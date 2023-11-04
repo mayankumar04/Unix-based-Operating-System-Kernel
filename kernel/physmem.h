@@ -1,7 +1,7 @@
 #ifndef _physmem_h_
 #define _physmem_h_
-
 #include "stdint.h"
+#include "idt.h"
 
 namespace PhysMem {
     constexpr uint32_t FRAME_SIZE = 1 << 12;

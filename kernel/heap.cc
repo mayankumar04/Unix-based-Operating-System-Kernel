@@ -1,7 +1,5 @@
 #include "heap.h"
-#include "debug.h"
-#include "stdint.h"
-#include "atomic.h"
+
 
 /* A first-fit heap */
 

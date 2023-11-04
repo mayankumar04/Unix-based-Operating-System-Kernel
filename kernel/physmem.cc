@@ -1,8 +1,6 @@
 #include "physmem.h"
-#include "atomic.h"
 #include "debug.h"
 #include "atomic.h"
-#include "idt.h"
 
 namespace PhysMem {
 

@@ -1,7 +1,4 @@
 #include "smp.h"
-#include "machine.h"
-#include "debug.h"
-#include "idt.h"
 
 AtomicPtr<uint32_t> SMP::id;
 AtomicPtr<uint32_t> SMP::eoi_reg;

@@ -1,12 +1,4 @@
-#include "debug.h"
-#include "ide.h"
-#include "ext2.h"
-#include "elf.h"
-#include "machine.h"
-#include "libk.h"
-#include "config.h"
-#include "future.h"
-#include <coroutine>
+#include "kernel.h"
 
 Node* checkFile(const char* name, Node* node) {
     CHECK(node != nullptr);
@@ -31,15 +23,19 @@ Node* getDir(Ext2* fs, Node* node, const char* name) {
     return checkDir(name,fs->find(node,name));
 }
 
+Ext2* fs;
+extern PerCPU<pcb*> pcbs;
+
 Future<int> kernelMain(void) {
     auto d = new Ide(1);
     Debug::printf("mounting drive 1\n");
-    auto fs = new Ext2(d);
+    fs = new Ext2(d);
     auto root = checkDir("/",fs->root);
     auto sbin = getDir(fs,root,"sbin");
     auto init = getFile(fs,sbin,"init");
 
     Debug::printf("loading init\n");
+    pcbs.mine() = new pcb();
     uint32_t e = ELF::load(init);
     Debug::printf("entry %x\n",e);
     auto userEsp = 0xF0000000 - 4;
@@ -59,6 +55,7 @@ Future<int> kernelMain(void) {
     // User mode will never "return" from switchToUser. It will
     // enter the kernel through interrupts, exceptions, and system
     // calls.
+    ((uint32_t*)userEsp)[0] = 1;
     switchToUser(e,userEsp,0);
     Debug::panic("*** implement switchToUser in machine.S\n");
     co_return -1;

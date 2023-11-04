@@ -1,5 +1,4 @@
 #pragma once
-
 #include "semaphore.h"
 
 // A future represents a value of type "T" that will be ready in the "future"

@@ -2,6 +2,8 @@
 #define _HEAP_H_
 
 #include "stdint.h"
+#include "debug.h"
+#include "atomic.h"
 
 namespace gheith {
     extern uint32_t heap_count;

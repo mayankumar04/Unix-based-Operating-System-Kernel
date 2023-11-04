@@ -1,21 +1,12 @@
 #include "init.h"
-
 #include "debug.h"
 #include "config.h"
-#include "u8250.h"
 #include "smp.h"
-#include "machine.h"
 #include "kernel.h"
 #include "heap.h"
 #include "pit.h"
-#include "idt.h"
-#include "crt.h"
-#include "stdint.h"
 #include "events.h"
 #include "sys.h"
-#include "tss.h"
-#include "physmem.h"
-#include "vmm.h"
 
 struct Stack {
     static constexpr int BYTES = 8192;

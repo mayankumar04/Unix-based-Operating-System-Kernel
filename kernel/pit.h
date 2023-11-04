@@ -1,10 +1,12 @@
 #ifndef _PIT_H_
 #define _PIT_H_
-
 #include "stdint.h"
 #include "smp.h"
 #include "atomic.h"
 #include "debug.h"
+#include "machine.h"
+#include "idt.h"
+#include "vmm.h"
 
 class Pit {
     static uint32_t jiffiesPerSecond;

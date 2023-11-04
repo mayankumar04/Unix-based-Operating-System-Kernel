@@ -1,7 +1,4 @@
 #include "u8250.h"
-#include "machine.h"
-
-/* 8250 */
 
 void U8250::put(char c) {
     while (!(inb(0x3F8+5) & 0x20));

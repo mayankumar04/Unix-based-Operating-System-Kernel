@@ -1,8 +1,8 @@
 #include "pit.h"
-#include "debug.h"
-#include "machine.h"
-#include "idt.h"
-#include "smp.h"
+#include "events.h"
+#include "pcb.h"
+
+extern PerCPU<pcb*> pcbs;
 
 /*
  * The old PIT runs at a fixed frequency of 1193182Hz but doesn't support
@@ -134,11 +134,23 @@ void Pit::init() {
     SMP::apit_initial_count.set(apitCounter);
 }
 
-extern "C" void apitHandler(uint32_t* things) {
+extern "C" void apitHandler(uint32_t* frame) {
     // interrupts are disabled.
     auto id = SMP::me();
     if (id == 0) {
         Pit::jiffies = Pit::jiffies + 1;
     }
     SMP::eoi_reg.set(0);
+    if((frame[9] & 0b11) == 0)
+        return;
+    pcb* curr_pcb = pcbs.mine();
+    curr_pcb->pd = getCR3();
+    memcpy((char*)(curr_pcb->regs), (char*) frame, 52);
+    vmm_on(VMM::kernel_map);
+    go([curr_pcb]{
+        vmm_on(curr_pcb->pd);
+        pcbs.mine() = curr_pcb;
+        restart(curr_pcb->regs);
+    });
+    event_loop();
 }

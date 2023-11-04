@@ -2,6 +2,7 @@
 #define _CONFIG_H_
 
 #include "stdint.h"
+#include "debug.h"
 
 struct ApicInfo {
     uint8_t processorId;

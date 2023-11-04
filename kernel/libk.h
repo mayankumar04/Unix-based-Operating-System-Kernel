@@ -3,6 +3,7 @@
 
 #include <stdarg.h>
 #include "io.h"
+#include "debug.h"
 
 class K {
 public:

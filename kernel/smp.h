@@ -4,6 +4,9 @@
 #include "config.h"
 #include "stdint.h"
 #include "atomic.h"
+#include "machine.h"
+#include "debug.h"
+#include "idt.h"
 
 class SMP {
 private:

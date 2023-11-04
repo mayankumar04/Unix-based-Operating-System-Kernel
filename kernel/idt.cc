@@ -1,8 +1,4 @@
 #include "idt.h"
-#include "stdint.h"
-#include "debug.h"
-#include "machine.h"
-#include "smp.h"
 
 extern uint32_t idt[];
 extern uint32_t kernelCS;

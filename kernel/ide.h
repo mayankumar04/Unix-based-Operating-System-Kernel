@@ -4,6 +4,8 @@
 #include "stdint.h"
 #include "block_io.h"
 #include "atomic.h"
+#include "debug.h"
+#include "machine.h"
 
 // Simple (way too simple) device driver for IDE devices (mostly disks)
 //

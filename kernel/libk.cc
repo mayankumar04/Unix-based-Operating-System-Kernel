@@ -1,5 +1,4 @@
 #include "libk.h"
-#include "debug.h"
 
 long K::strlen(const char* str) {
     long n = 0;

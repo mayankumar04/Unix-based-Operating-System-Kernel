@@ -1,5 +1,4 @@
 #pragma once
-
 #include "stdint.h"
 #include "atomic.h"
 #include "heap.h"

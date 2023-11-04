@@ -1,6 +1,4 @@
 #include "atomic.h"
-#include "machine.h"
-
 #include "debug.h"
 
 void pause() {

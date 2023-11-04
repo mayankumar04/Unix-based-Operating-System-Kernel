@@ -1,5 +1,4 @@
 #include "ext2.h"
-#include "libk.h"
 
 Ext2::Ext2(Ide* ide): ide(ide), root() {
     SuperBlock sb;
