@@ -38,7 +38,7 @@ Future<int> kernelMain(void) {
     pcbs.mine() = new pcb();
     uint32_t e = ELF::load(init);
     Debug::printf("entry %x\n",e);
-    auto userEsp = 0xF0000000 - 4;
+    uint32_t userEsp = 0xEFFFFFE0;
     Debug::printf("user esp %x\n",userEsp);
     // Current state:
     //     - %eip points somewhere in the middle of kernelMain
@@ -56,6 +56,8 @@ Future<int> kernelMain(void) {
     // enter the kernel through interrupts, exceptions, and system
     // calls.
     ((uint32_t*)userEsp)[0] = 1;
+    ((uint32_t*)userEsp)[1] = userEsp + 8;
+    memcpy((char*)(userEsp + 8), "/sbin/init", 11);
     switchToUser(e,userEsp,0);
     Debug::panic("*** implement switchToUser in machine.S\n");
     co_return -1;

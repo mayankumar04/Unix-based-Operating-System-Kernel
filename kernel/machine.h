@@ -53,7 +53,5 @@ extern uint32_t kernelSS;
 
 extern "C" void sysHandler_(void);
 
-extern "C" void restart(uint32_t* regs);
-
 
 #endif

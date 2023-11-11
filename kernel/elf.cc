@@ -38,30 +38,119 @@ uint32_t ELF::load(Node* file) {
         ProgramHeader* p_head = new ProgramHeader();
         memcpy((char*)p_head, buffer + 32 * i, 32);
         if(p_head->type == 1){
-            if(p_head->vaddr < 0x80000000 || p_head->memsz < p_head->filesz){
+            if(p_head->vaddr < 0x80000000 || p_head->vaddr >= 0xF0000000 || p_head->memsz < p_head->filesz || p_head->memsz >= 0xF0000000 - p_head->vaddr){
                 delete elf_head;
                 delete[] buffer;
                 delete p_head;
                 return 0;
             }
-            if(ans >= p_head->vaddr && ans < p_head->vaddr + p_head->memsz){
-                char* new_buffer = new char[p_head->filesz];
-                if(file->read_all(p_head->offset, p_head->filesz, new_buffer) < p_head->filesz){
-                    delete elf_head;
-                    delete[] buffer;
-                    delete p_head;
-                    delete[] new_buffer;
-                    return 0;
-                }
-                memcpy((char*)(p_head->vaddr), new_buffer, p_head->filesz);
+            char* new_buffer = new char[p_head->filesz];
+            if(file->read_all(p_head->offset, p_head->filesz, new_buffer) < p_head->filesz || !empty_update(p_head->vaddr, p_head->memsz)){
+                delete elf_head;
+                delete[] buffer;
+                delete p_head;
                 delete[] new_buffer;
-            }else
-                pcbs.mine()->segments.push_back(load_segment{p_head->offset, p_head->filesz, p_head->vaddr});
+                return 0;
+            }
+            memcpy((char*)(p_head->vaddr), new_buffer, p_head->filesz);
+            delete[] new_buffer;
         }
         delete p_head;
     }
     delete elf_head;
     delete[] buffer;
-    pcbs.mine()->file = file;
     return ans;
+}
+
+bool ELF::empty_update(uint32_t addr, uint32_t size){
+    map_range* curr = pcbs.mine()->empty_list;
+    while(curr != nullptr){
+        if(curr->size < size){
+            curr = curr->next;
+            continue;
+        }
+        if(curr->addr == addr && curr->size == size){
+            if(curr->prev == nullptr && curr->next == nullptr)
+                pcbs.mine()->empty_list = nullptr;
+            else if(curr->prev == nullptr){
+                curr->next->prev = nullptr;
+                pcbs.mine()->empty_list = curr->next;
+            }else if(curr->next == nullptr)
+                curr->prev->next = nullptr;
+            else{
+                curr->prev->next = curr->next;
+                curr->next->prev = curr->prev;
+            }
+            delete curr;
+            return true;
+        }else if(curr->addr == addr && curr->size > size){
+            curr->addr = addr + size;
+            curr->size -= size;
+            return true;
+        }else if(curr->addr < addr && addr - curr->addr == curr->size - size){
+            curr->size -= size;
+            return true;
+        }else if(curr->addr < addr && addr - curr->addr < curr->size - size){
+            map_range* inserted = new map_range{addr + size, (curr->size - size) - (addr - curr->addr), curr, curr->next};
+            curr->size = addr - curr->addr;
+            if(curr->next != nullptr)
+                curr->next->prev = inserted;
+            curr->next = inserted;
+            return true;
+        }
+        curr = curr->next;
+    }
+    return false;
+}
+
+bool ELF::empty_add(uint32_t addr, uint32_t size){
+    if(addr < 0x80000000 || addr >= 0xF0000000 || size >= 0xF0000000 - addr)
+        return false;
+    if(pcbs.mine()->empty_list == nullptr){
+        pcbs.mine()->empty_list = new map_range{addr, size, nullptr, nullptr};
+        return true;
+    }
+    map_range* curr = pcbs.mine()->empty_list;
+    if(addr < curr->addr && size <= curr->addr - addr){
+        if(size == curr->addr - addr){
+            curr->addr = addr;
+            curr->size += size;
+        }
+        else{
+            curr->prev = new map_range{addr, size, nullptr, curr};
+            pcbs.mine()->empty_list = curr->prev;
+        }
+        return true;
+    }
+    while(curr->next != nullptr){
+        if(addr > curr->addr && addr < curr->next->addr){
+            if(addr - curr->addr == curr->size && curr->next->addr - addr == size){
+                curr->size += size + curr->next->size;
+                map_range* temp = curr->next;
+                curr->next = curr->next->next;
+                if(curr->next != nullptr)
+                    curr->next->prev = curr;
+                delete temp;
+                return true;
+            }else if(addr - curr->addr == curr->size){
+                curr->size += size;
+                return true;
+            }else if(curr->next->addr - addr == size){
+                curr->next->addr = addr;
+                curr->next->size += size;
+                return true;
+            }else if(curr->addr + curr->size < addr && addr + size < curr->next->addr){
+                map_range* temp = new map_range{addr, size, curr, curr->next};
+                curr->next->prev = temp;
+                curr->next = temp;
+                return true;
+            }else return false;
+        }
+        curr = curr->next;
+    }
+    if(addr - curr->addr == curr->size)
+        curr->size += size;
+    else
+        curr->next = new map_range{addr, size, curr, nullptr};
+    return true;
 }

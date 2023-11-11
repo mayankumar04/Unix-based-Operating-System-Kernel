@@ -174,13 +174,11 @@ switchToUser:
 
 	.global sysHandler_
 sysHandler_:
-        pusha
         push %esp
         push %eax
         .extern sysHandler
         call sysHandler
         add $8,%esp
-        popa
         iret
 
 /* invlpg(uint32_t va) */
@@ -226,18 +224,3 @@ getCR3:
     mov %cr3,%eax
     ret
 
-	.global restart
-restart:
-    movl 4(%esp), %eax             # moving parameter address into %eax
-    add $48, %eax                  # moving to the last position in regs array (to copy in reverse)
-    movl $0, %ebx                  # %ebx is a counter variable
-    L1:
-        sub $4, %esp               # edit stack pointer
-        movl (%eax), %ecx          # moving current value in regs array into temporary register
-        movl %ecx, (%esp)          # moving temporary register onto the stack
-        sub $4, %eax               # subtract 4 from %eax to move to the next element in regs array
-        add $1, %ebx               # incrementing counter
-    cmp $13, %ebx                  # comparison to loop
-    jl L1                          # jump to L1
-    popa
-    iret

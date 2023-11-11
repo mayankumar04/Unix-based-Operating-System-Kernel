@@ -20,6 +20,7 @@ public:
     T pop(){
         ASSERT(top_index >= 0);
         T result = v.get(top_index);
+        v.delete_back();
         --top_index;
         return result;
     }

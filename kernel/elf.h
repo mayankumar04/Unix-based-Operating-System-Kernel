@@ -5,10 +5,13 @@
 #include "ext2.h"
 #include "machine.h"
 #include "smp.h"
+#include "vmm.h"
 
 class ELF {
 public:
     static uint32_t load(Node* file);
+    static bool empty_update(uint32_t addr, uint32_t size);
+    static bool empty_add(uint32_t addr, uint32_t size);
 };
 
 struct ElfHeader {

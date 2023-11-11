@@ -7,24 +7,27 @@ extern "C" int sysHandler(uint32_t eax, uint32_t *frame) {
     auto userEsp = (uint32_t*) frame[11];
     // auto userEip = frame[8];
     switch(eax) {
+
+        // EXIT
         case 0:{
             exit(userEsp[1]);
         }
+
+        // PRINT
         case 1:{
-            if(userEsp[2] < 0x80000000 || userEsp[2] >= 0xF0000000){
+            if(userEsp[2] < 0x80000000 || userEsp[2] >= 0xF0000000 || userEsp[3] >= 0xF0000000 - userEsp[2]){
                 frame[7] = -1;
                 return 69;
             }
-            if(userEsp[2] + userEsp[3] > 0xF0000000){
-                frame[7] = -1;
-                return 69;
-            }
-            auto p = (char*) userEsp[2];
+            char* p = (char*) userEsp[2];
+            //Debug::printf("CURR PD: %x ", getCR3());
             for(uint32_t i = 0; i < userEsp[3]; ++i)
                 Debug::printf("%c", p[i]);
             frame[7] = userEsp[3];
             return 69;
         }
+
+        // FORK
         case 2:{
             uint32_t* og_pd = (uint32_t*) getCR3();
             uint32_t* copy_pd = (uint32_t*) PhysMem::alloc_frame();
@@ -53,7 +56,33 @@ extern "C" int sysHandler(uint32_t eax, uint32_t *frame) {
             pcb* child_pcb = new pcb();
             child_pcb->pd = (uint32_t) copy_pd;
             memcpy((char*)(child_pcb->regs), (char*)frame, 52);
+            memcpy((char*)(pcbs.mine()->regs), (char*)frame, 52);
+            memcpy((char*)(child_pcb->back_regs), (char*)(pcbs.mine()->back_regs), 52);
             child_pcb->regs[7] = 0;
+            pcbs.mine()->regs[7] = 1;
+            for(uint32_t i = 0; i < 100; ++i)
+                child_pcb->sems[i] = pcbs.mine()->sems[i];
+            child_pcb->handler = nullptr;
+            if(pcbs.mine()->mmap != nullptr){
+                child_pcb->mmap = new map_range{pcbs.mine()->mmap->addr, pcbs.mine()->mmap->size, nullptr, nullptr};
+                child_pcb->mmap->loaded = pcbs.mine()->mmap->loaded;
+                map_range* curr_child = child_pcb->mmap, *curr = pcbs.mine()->mmap->next;
+                while(curr != nullptr){
+                    curr_child->next = new map_range{curr->addr, curr->size, curr_child, nullptr};
+                    curr_child->next->loaded = curr->loaded;
+                    curr_child = curr_child->next;
+                    curr = curr->next;
+                }
+            }
+            if(pcbs.mine()->empty_list != nullptr){
+                child_pcb->empty_list = new map_range{pcbs.mine()->empty_list->addr, pcbs.mine()->empty_list->size, nullptr, nullptr};
+                map_range* curr_child = child_pcb->empty_list, *curr = pcbs.mine()->empty_list->next;
+                while(curr != nullptr){
+                    curr_child->next = new map_range{curr->addr, curr->size, curr_child, nullptr};
+                    curr_child = curr_child->next;
+                    curr = curr->next;
+                }
+            }
             pcbs.mine()->s.push(child_pcb);
             go([child_pcb]() {
                 vmm_on(child_pcb->pd);
@@ -63,9 +92,48 @@ extern "C" int sysHandler(uint32_t eax, uint32_t *frame) {
             frame[7] = 1;
             return 69;
         }
+
+        // SHUTDOWN
         case 7:{
             Debug::shutdown();
         }
+
+        // YIELD
+        case 998:{
+            pcb* curr_pcb = pcbs.mine();
+            curr_pcb->pd = getCR3();
+            memcpy((char*)(curr_pcb->regs), (char*)frame, 52);
+            vmm_on(VMM::kernel_map);
+            go([curr_pcb]{
+                vmm_on(curr_pcb->pd);
+                pcbs.mine() = curr_pcb;
+                restart(curr_pcb->regs);
+            });
+            event_loop();
+        }
+
+        // JOIN
+        case 999:{
+            pcb* curr_pcb = pcbs.mine();
+            if(curr_pcb->s.empty()){
+                frame[7] = -1;
+                return 69;
+            }
+            pcb* top_child = pcbs.mine()->s.pop();
+            curr_pcb->pd = getCR3();
+            memcpy((char*)(curr_pcb->regs), (char*)frame, 52);
+            vmm_on(VMM::kernel_map);
+            top_child->f.get([top_child, curr_pcb, frame](uint32_t error_code){
+                vmm_on(curr_pcb->pd);
+                pcbs.mine() = curr_pcb;
+                curr_pcb->regs[7] = error_code;
+                delete top_child;
+                restart(curr_pcb->regs);
+            });
+            event_loop();
+        }
+
+        // EXECL
         case 9:
         case 1000:{
             uint32_t prev = 1, tracker = 1;
@@ -150,12 +218,21 @@ extern "C" int sysHandler(uint32_t eax, uint32_t *frame) {
             }
             uint32_t old_pd = getCR3();
             VMM::per_core_init();
-            delete_file(old_pd);
+            pcb* old_pcb = pcbs.mine();
+            pcbs.mine() = new pcb();
+            pcbs.mine()->pd = getCR3();
+            memcpy((char*)(pcbs.mine()->regs), (char*)(old_pcb->regs), 52);
+            memcpy((char*)(pcbs.mine()->back_regs), (char*)(old_pcb->back_regs), 52);
             uint32_t entry = ELF::load(curr);
             if(entry < 0x80000000 || entry >= 0xF0000000){
+                vmm_on(old_pd);
+                delete pcbs.mine();
+                pcbs.mine() = old_pcb;
                 frame[7] = -1;
                 return 69;
             }
+            delete_file(old_pd);
+            delete old_pcb;
             memcpy((char*) N, all_args, total);
             delete[] all_args;
             N -= 4 * (args + 1);
@@ -169,57 +246,155 @@ extern "C" int sysHandler(uint32_t eax, uint32_t *frame) {
             delete[] last;
             switchToUser(entry, N, 0);
         }
-        case 999:{
-            pcb* curr_pcb = pcbs.mine();
-            if(curr_pcb->s.empty()){
+
+        // SEM
+        case 1001:{
+            for(uint32_t i = 0; i < 100; ++i)
+                if(pcbs.mine()->sems[i] == nullptr){
+                    pcbs.mine()->sems[i] = new Semaphore(userEsp[1]);
+                    frame[7] = i;
+                    return 69;
+                }
+            frame[7] = -1;
+            return 69;
+        }
+
+        // SEM-UP
+        case 1002:{
+            if(userEsp[1] >= 100 || pcbs.mine()->sems[userEsp[1]] == nullptr){
                 frame[7] = -1;
                 return 69;
             }
-            curr_pcb->pd = getCR3();
-            memcpy((char*)(curr_pcb->regs), (char*)frame, 52);
-            vmm_on(VMM::kernel_map);
-            pcbs.mine()->s.pop()->f.get([curr_pcb, frame](uint32_t error_code){
-                vmm_on(curr_pcb->pd);
-                pcbs.mine() = curr_pcb;
-                curr_pcb->regs[7] = error_code;
-                restart(curr_pcb->regs);
-            });
-            event_loop();
-        }
-        case 998:{
-            pcb* curr_pcb = pcbs.mine();
-            curr_pcb->pd = getCR3();
-            memcpy((char*)(curr_pcb->regs), (char*)frame, 52);
-            vmm_on(VMM::kernel_map);
-            go([curr_pcb]{
-                vmm_on(curr_pcb->pd);
-                pcbs.mine() = curr_pcb;
-                restart(curr_pcb->regs);
-            });
-            event_loop();
-        }
-        case 1001:{
-            Semaphore* sm = new Semaphore(userEsp[1]);
-            frame[7] = (uint32_t) sm;
-            return 69;
-        }
-        case 1002:{
-            ((Semaphore*) userEsp[1])->up();
+            pcbs.mine()->sems[userEsp[1]]->up();
             break;
         }
+
+        // SEM-DOWN
         case 1003:{
-            pcb* curr_pcb = pcbs.mine();
-            curr_pcb->pd = getCR3();
-            memcpy((char*)(curr_pcb->regs), (char*)frame, 52);
-            Semaphore* temp = (Semaphore*) userEsp[1];
+            if(userEsp[1] >= 100 || pcbs.mine()->sems[userEsp[1]] == nullptr){
+                frame[7] = -1;
+                return 69;
+            }
+            pcbs.mine()->pd = getCR3();
+            uint32_t* temp = new uint32_t[13];
+            memcpy((char*)temp, (char*)frame, 52);
             vmm_on(VMM::kernel_map);
-            temp->down([curr_pcb]{
+            pcb* curr_pcb = pcbs.mine();
+            pcbs.mine()->sems[userEsp[1]]->down([curr_pcb, temp]{
                 vmm_on(curr_pcb->pd);
                 pcbs.mine() = curr_pcb;
+                memcpy((char*)(curr_pcb->regs), (char*)temp, 52);
+                delete[] temp;
+                curr_pcb->regs[7] = 0;
                 restart(curr_pcb->regs);
             });
             event_loop();
         }
+
+        // SIGNAL
+        case 1004:{
+            pcbs.mine()->handler = (void*) userEsp[1];
+            break;
+        }
+
+        // MMAP
+        case 1005:{
+            uint32_t addr = userEsp[1], size = userEsp[2];
+            if(addr % 4096 != 0 || size % 4096 != 0)
+                break;
+            if(size == 0){
+                frame[7] = 69;
+                return 69;
+            }
+            if(addr == 0){
+                map_range* curr = pcbs.mine()->empty_list;
+                while(curr != nullptr){
+                    if(curr->size <= size){
+                        frame[7] = curr->addr;
+                        pcbs.mine()->mmap = new map_range{curr->addr, size, nullptr, pcbs.mine()->mmap};
+                        pcbs.mine()->mmap->next->prev = pcbs.mine()->mmap;
+                        ELF::empty_update(curr->addr, size);
+                        return 69;
+                    }
+                    curr = curr->next;
+                }
+            }else{
+                if(!ELF::empty_update(addr, size))
+                    break;
+                pcbs.mine()->mmap = new map_range{addr, size, nullptr, pcbs.mine()->mmap};
+                pcbs.mine()->mmap->next->prev = pcbs.mine()->mmap;
+                frame[7] = addr;
+                return 69;
+            }
+            break;
+        }
+
+        // SIG-RETURN
+        case 1006:{
+            if(pcbs.mine()->handler == nullptr)
+                memcpy((char*)(pcbs.mine()->regs), (char*)frame, 52);
+            else
+                memcpy((char*)(pcbs.mine()->regs), (char*)(pcbs.mine()->back_regs), 52);
+            restart(pcbs.mine()->regs);
+        }
+
+        // SEM CLOSE
+        case 1007:{
+            if(userEsp[1] >= 100 || pcbs.mine()->sems[userEsp[1]] == nullptr){
+                frame[7] = -1;
+                return 69;
+            }
+            delete pcbs.mine()->sems[userEsp[1]];
+            pcbs.mine()->sems[userEsp[1]] = nullptr;
+            break;
+        }
+
+        // UNMAP
+        case 1008:{
+            uint32_t addr = userEsp[1];
+            if(addr < 0x80000000 || addr >= 0xF0000000){
+                frame[7] = -1;
+                return 69;
+            }
+            map_range* curr = pcbs.mine()->mmap;
+            while(curr != nullptr){
+                if(addr >= curr->addr && addr - curr->addr < curr->size){
+                    if(!ELF::empty_add(curr->addr, curr->size))
+                        break;
+                    if(curr->loaded){
+                        uint32_t* pd = (uint32_t*) getCR3();
+                        for(uint32_t i = curr->addr; i - curr->addr < curr->size; i += 4096){
+                            uint32_t pt = pd[i >> 22];
+                            if(pt & 1){
+                                uint32_t* pt_ptr = (uint32_t*)(pt & 0xFFFFF000);
+                                if(pt_ptr[(i << 10) >> 22] & 1){
+                                    PhysMem::dealloc_frame(pt_ptr[(i << 10) >> 22] & 0xFFFFF000);
+                                    pt_ptr[(i << 10) >> 22] = 0;
+                                }
+                            }
+                        }
+                        vmm_on(getCR3());
+                    }
+                    if(curr->prev == nullptr && curr->next == nullptr)
+                        pcbs.mine()->mmap = nullptr;
+                    else if(curr->prev == nullptr)
+                        pcbs.mine()->mmap = curr->next;
+                    else if(curr->next == nullptr)
+                        curr->prev->next = nullptr;
+                    else{
+                        curr->prev->next = curr->next;
+                        curr->next->prev = curr->prev;
+                    }
+                    delete curr;
+                    frame[7] = 0;
+                    return 69;
+                }
+                curr = curr->next;
+            }
+            frame[7] = -1;
+            return 69;
+        }
+
         default:{
             Debug::panic("syscall %d\n", eax);
         }
@@ -235,10 +410,8 @@ void SYS::init(void) {
 void exit(uint32_t error_code){
     pcbs.mine()->f.set(error_code);
     uint32_t old_pd = getCR3();
-    VMM::per_core_init();
     vmm_on(VMM::kernel_map);
     delete_file(old_pd);
-    delete pcbs.mine();
     event_loop();
 }
 

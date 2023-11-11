@@ -61,12 +61,42 @@ namespace VMM {
     }
 }
 
-extern "C" void vmm_pageFault(uintptr_t va_, uintptr_t* saveState) {
-    if(va_ < 0x80000000 || va_ >= 0xF0000000){
+void signal_handler(uintptr_t va_, uintptr_t* frame){
+    if(pcbs.mine()->handler == nullptr){
         ((uint32_t*) 0xF0000800)[0] = va_;
         exit(139);
+    }else{
+        pcb* curr_pcb = pcbs.mine();
+        curr_pcb->pd = getCR3();
+        memcpy((char*)(curr_pcb->back_regs), (char*)(curr_pcb->regs), 52);
+        uint32_t userEsp = frame[12] - 140;
+        userEsp -= userEsp % 16;
+        ((uint32_t*) userEsp)[1] = 1;
+        ((uint32_t*) userEsp)[2] = va_;
+        switchToUser((uint32_t) pcbs.mine()->handler, userEsp, 0);
     }
-    uint32_t *pd = (uint32_t*) getCR3(), x = va_ >> 22, y = (va_ << 10) >> 22, pt = pd[x];
+}
+
+extern "C" void vmm_pageFault(uintptr_t va_, uintptr_t* frame){
+    memcpy((char*)(pcbs.mine()->regs), (char*)frame, 32);
+    memcpy((char*)(pcbs.mine()->regs + 8), (char*)(frame + 9), 20);
+    if(va_ < 0x80000000 || va_ >= 0xF0000000)
+        signal_handler(va_, frame);
+    map_range* curr = pcbs.mine()->empty_list;
+    while(curr != nullptr){
+        if(va_ >= curr->addr && va_ - curr->addr < curr->size)
+            signal_handler(va_, frame);
+        curr = curr->next;
+    }
+    curr = pcbs.mine()->mmap;
+    while(curr != nullptr){
+        if(va_ >= curr->addr && va_ - curr->addr < curr->size){
+            curr->loaded = true;
+            break;
+        }
+        curr = curr->next;
+    }
+    uint32_t* pd = (uint32_t*) getCR3(), x = va_ >> 22, y = (va_ << 10) >> 22, pt = pd[x];
     if(pt & 1){
         uint32_t* pt_ptr = (uint32_t*) (pt & 0xFFFFF000);
         pt_ptr[y] = PhysMem::alloc_frame() | 0b111;
@@ -75,16 +105,5 @@ extern "C" void vmm_pageFault(uintptr_t va_, uintptr_t* saveState) {
         uint32_t* pt_ptr = (uint32_t*) pt;
         pt_ptr[y] = PhysMem::alloc_frame() | 0b111;
         pd[x] = pt | 0b111;
-    }
-
-    int N = pcbs.mine()->segments.size();
-    for(int i = 0; i < N; ++i){
-        load_segment segment = pcbs.mine()->segments.get(i);
-        if(va_ >= segment.addr && va_ < segment.addr + segment.size){
-            if(pcbs.mine()->file->read_all(segment.offset, segment.size, (char*)segment.addr) < segment.size)
-                exit(139);
-            pcbs.mine()->segments.erase(i);
-            break;
-        }
     }
 }
