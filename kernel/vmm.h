@@ -15,4 +15,6 @@ namespace VMM {
     extern uint32_t shared_pt, APIC, kernel_map;
 }
 
+void signal_handler(uintptr_t va_, uintptr_t* frame);
+
 #endif

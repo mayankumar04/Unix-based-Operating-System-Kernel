@@ -1,4 +1,6 @@
 #include "kernel.h"
+#include "sys.h"
+#include "pcb.h"
 
 Node* checkFile(const char* name, Node* node) {
     CHECK(node != nullptr);

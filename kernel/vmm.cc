@@ -77,6 +77,18 @@ void signal_handler(uintptr_t va_, uintptr_t* frame){
     }
 }
 
+void load_mmap(uint32_t va_, map_range* curr, uint32_t load_addr){
+    if(curr->fd == nullptr || !curr->fd->read)
+        return;
+    uint32_t true_offset = curr->offset + (va_ - (va_ % 4096) - curr->addr);
+    char* buffer = new char[4096];
+    memcpy(buffer, (char*) load_addr, 4096);
+    if(curr->fd->file->read_all(true_offset, 4096, buffer) < 0)
+        Debug::panic("*** THE FILE SYSTEM COULD NOT READ FROM THE FILE\n");
+    memcpy((char*) load_addr, buffer, 4096);
+    delete[] buffer;
+}
+
 extern "C" void vmm_pageFault(uintptr_t va_, uintptr_t* frame){
     memcpy((char*)(pcbs.mine()->regs), (char*)frame, 32);
     memcpy((char*)(pcbs.mine()->regs + 8), (char*)(frame + 9), 20);
@@ -89,8 +101,11 @@ extern "C" void vmm_pageFault(uintptr_t va_, uintptr_t* frame){
         curr = curr->next;
     }
     curr = pcbs.mine()->mmap;
+    bool mmap_loading = false;
+    uint32_t load_addr = 0;
     while(curr != nullptr){
         if(va_ >= curr->addr && va_ - curr->addr < curr->size){
+            mmap_loading = true;
             curr->loaded = true;
             break;
         }
@@ -103,7 +118,10 @@ extern "C" void vmm_pageFault(uintptr_t va_, uintptr_t* frame){
     }else{
         pt = PhysMem::alloc_frame();
         uint32_t* pt_ptr = (uint32_t*) pt;
-        pt_ptr[y] = PhysMem::alloc_frame() | 0b111;
+        load_addr = PhysMem::alloc_frame();
+        pt_ptr[y] = load_addr | 0b111;
         pd[x] = pt | 0b111;
     }
+    if(mmap_loading)
+        load_mmap(va_, curr, load_addr);
 }

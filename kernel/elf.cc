@@ -91,7 +91,7 @@ bool ELF::empty_update(uint32_t addr, uint32_t size){
             curr->size -= size;
             return true;
         }else if(curr->addr < addr && addr - curr->addr < curr->size - size){
-            map_range* inserted = new map_range{addr + size, (curr->size - size) - (addr - curr->addr), curr, curr->next};
+            map_range* inserted = new map_range{addr + size, (curr->size - size) - (addr - curr->addr), curr, curr->next, false, nullptr, 0};
             curr->size = addr - curr->addr;
             if(curr->next != nullptr)
                 curr->next->prev = inserted;
@@ -107,7 +107,7 @@ bool ELF::empty_add(uint32_t addr, uint32_t size){
     if(addr < 0x80000000 || addr >= 0xF0000000 || size >= 0xF0000000 - addr)
         return false;
     if(pcbs.mine()->empty_list == nullptr){
-        pcbs.mine()->empty_list = new map_range{addr, size, nullptr, nullptr};
+        pcbs.mine()->empty_list = new map_range{addr, size, nullptr, nullptr, false, nullptr, 0};
         return true;
     }
     map_range* curr = pcbs.mine()->empty_list;
@@ -117,7 +117,7 @@ bool ELF::empty_add(uint32_t addr, uint32_t size){
             curr->size += size;
         }
         else{
-            curr->prev = new map_range{addr, size, nullptr, curr};
+            curr->prev = new map_range{addr, size, nullptr, curr, false, nullptr, 0};
             pcbs.mine()->empty_list = curr->prev;
         }
         return true;
@@ -140,7 +140,7 @@ bool ELF::empty_add(uint32_t addr, uint32_t size){
                 curr->next->size += size;
                 return true;
             }else if(curr->addr + curr->size < addr && addr + size < curr->next->addr){
-                map_range* temp = new map_range{addr, size, curr, curr->next};
+                map_range* temp = new map_range{addr, size, curr, curr->next, false, nullptr, 0};
                 curr->next->prev = temp;
                 curr->next = temp;
                 return true;
@@ -151,6 +151,6 @@ bool ELF::empty_add(uint32_t addr, uint32_t size){
     if(addr - curr->addr == curr->size)
         curr->size += size;
     else
-        curr->next = new map_range{addr, size, curr, nullptr};
+        curr->next = new map_range{addr, size, curr, nullptr, false, nullptr, 0};
     return true;
 }

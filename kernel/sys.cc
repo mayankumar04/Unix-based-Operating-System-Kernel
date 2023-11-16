@@ -4,7 +4,7 @@ extern Ext2* fs;
 PerCPU<pcb*> pcbs;
 
 extern "C" int sysHandler(uint32_t eax, uint32_t *frame) {
-    auto userEsp = (uint32_t*) frame[11];
+    uint32_t* userEsp = (uint32_t*) frame[11];
     // auto userEip = frame[8];
     switch(eax) {
 
@@ -13,17 +13,29 @@ extern "C" int sysHandler(uint32_t eax, uint32_t *frame) {
             exit(userEsp[1]);
         }
 
-        // PRINT
-        case 1:{
-            if(userEsp[2] < 0x80000000 || userEsp[2] >= 0xF0000000 || userEsp[3] >= 0xF0000000 - userEsp[2]){
+        // WRITE
+        case 1:
+        case 1025:{
+            uint32_t fd = userEsp[1], count = userEsp[3];
+            if(fd >= 10 || pcbs.mine()->fd[fd] == nullptr || !pcbs.mine()->fd[fd]->write || !verify_range(userEsp[2], frame)){
                 frame[7] = -1;
                 return 69;
             }
+            if(count == 0){
+                frame[7] = 0;
+                return 69;
+            }
             char* p = (char*) userEsp[2];
-            //Debug::printf("CURR PD: %x ", getCR3());
-            for(uint32_t i = 0; i < userEsp[3]; ++i)
-                Debug::printf("%c", p[i]);
-            frame[7] = userEsp[3];
+            if(pcbs.mine()->fd[fd]->stdout){
+                for(uint32_t i = 0; i < userEsp[3]; ++i)
+                    Debug::printf("%c", p[i]);
+                frame[7] = userEsp[3];
+            }else{
+                if(!pcbs.mine()->fd[fd]->file->is_file())
+                    frame[7] = -1;
+                else
+                    Debug::panic("*** TRIED WRITING TO AN EXT2 FILE WHICH IS NOT LEGAL FOR THIS PROG\n");
+            }
             return 69;
         }
 
@@ -62,27 +74,28 @@ extern "C" int sysHandler(uint32_t eax, uint32_t *frame) {
             pcbs.mine()->regs[7] = 1;
             for(uint32_t i = 0; i < 100; ++i)
                 child_pcb->sems[i] = pcbs.mine()->sems[i];
+            for(uint32_t i = 0; i < 10; ++i)
+                child_pcb->fd[i] = pcbs.mine()->fd[i];
             child_pcb->handler = nullptr;
             if(pcbs.mine()->mmap != nullptr){
-                child_pcb->mmap = new map_range{pcbs.mine()->mmap->addr, pcbs.mine()->mmap->size, nullptr, nullptr};
-                child_pcb->mmap->loaded = pcbs.mine()->mmap->loaded;
+                child_pcb->mmap = new map_range{pcbs.mine()->mmap->addr, pcbs.mine()->mmap->size, nullptr, nullptr, pcbs.mine()->mmap->loaded, pcbs.mine()->mmap->fd, pcbs.mine()->mmap->offset};
                 map_range* curr_child = child_pcb->mmap, *curr = pcbs.mine()->mmap->next;
                 while(curr != nullptr){
-                    curr_child->next = new map_range{curr->addr, curr->size, curr_child, nullptr};
-                    curr_child->next->loaded = curr->loaded;
+                    curr_child->next = new map_range{curr->addr, curr->size, curr_child, nullptr, curr->loaded, curr->fd, curr->offset};
                     curr_child = curr_child->next;
                     curr = curr->next;
                 }
             }
             if(pcbs.mine()->empty_list != nullptr){
-                child_pcb->empty_list = new map_range{pcbs.mine()->empty_list->addr, pcbs.mine()->empty_list->size, nullptr, nullptr};
+                child_pcb->empty_list = new map_range{pcbs.mine()->empty_list->addr, pcbs.mine()->empty_list->size, nullptr, nullptr, false, nullptr, 0};
                 map_range* curr_child = child_pcb->empty_list, *curr = pcbs.mine()->empty_list->next;
                 while(curr != nullptr){
-                    curr_child->next = new map_range{curr->addr, curr->size, curr_child, nullptr};
+                    curr_child->next = new map_range{curr->addr, curr->size, curr_child, nullptr, false, nullptr, 0};
                     curr_child = curr_child->next;
                     curr = curr->next;
                 }
             }
+            child_pcb->cwd = pcbs.mine()->cwd;
             pcbs.mine()->s.push(child_pcb);
             go([child_pcb]() {
                 vmm_on(child_pcb->pd);
@@ -136,47 +149,15 @@ extern "C" int sysHandler(uint32_t eax, uint32_t *frame) {
         // EXECL
         case 9:
         case 1000:{
-            uint32_t prev = 1, tracker = 1;
-            auto curr = fs->root;
-            auto path = (char*) userEsp[1];
             if(userEsp[1] < 0x80000000 || userEsp[1] >= 0xF0000000){
                 frame[7] = -1;
                 return 69;
             }
-            while(path[tracker] != '\0'){
-                if(path[tracker] == '/'){
-                    char* file_name = new char[tracker - prev + 1];
-                    file_name[tracker - prev] = '\0';
-                    for(uint32_t i = prev; i < tracker; ++i){
-                        file_name[i - prev] = path[i];
-                    }
-                    if(!curr->is_dir()){
-                        delete[] file_name;
-                        frame[7] = -1;
-                        return 69;
-                    }
-                    curr = fs->find(curr, file_name);
-                    if(curr == nullptr){
-                        delete[] file_name;
-                        frame[7] = -1;
-                        return 69;
-                    }
-                    delete[] file_name;
-                    prev = tracker + 1;
-                }
-                ++tracker;
-            }
-            auto file_name = new char[tracker - prev + 1];
-            file_name[tracker - prev] = '\0';
-            for(uint32_t i = prev; i < tracker; ++i)
-                file_name[i - prev] = path[i];
-            curr = fs->find(curr, file_name);
+            Node* curr = find_node((char*) userEsp[1]);
             if(curr == nullptr || !curr->is_file()){
-                delete[] file_name;
                 frame[7] = -1;
                 return 69;
             }
-            delete[] file_name;
             uint32_t args = 0;
             while(userEsp[args + 2] != 0){
                 if(userEsp[args + 2] < 0x80000000 || userEsp[args + 2] >= 0xF0000000){
@@ -203,9 +184,9 @@ extern "C" int sysHandler(uint32_t eax, uint32_t *frame) {
             arg_pointers[args] = 0;
             char* all_args = new char[total];
             if(args > 0){
-                prev = 0;
+                uint32_t prev = 0;
                 for (uint32_t i = 2; i < args + 2; ++i) {
-                    auto curr_arg = (char *) userEsp[i];
+                    char* curr_arg = (char*) userEsp[i];
                     uint32_t j = 0;
                     while (curr_arg[j] != '\0') {
                         all_args[prev + j] = curr_arg[j];
@@ -232,7 +213,9 @@ extern "C" int sysHandler(uint32_t eax, uint32_t *frame) {
                 return 69;
             }
             delete_file(old_pd);
-            delete old_pcb;
+            old_pcb->pd = getCR3();
+            delete pcbs.mine();
+            pcbs.mine() = old_pcb;
             memcpy((char*) N, all_args, total);
             delete[] all_args;
             N -= 4 * (args + 1);
@@ -299,19 +282,26 @@ extern "C" int sysHandler(uint32_t eax, uint32_t *frame) {
 
         // MMAP
         case 1005:{
-            uint32_t addr = userEsp[1], size = userEsp[2];
-            if(addr % 4096 != 0 || size % 4096 != 0)
+            uint32_t addr = userEsp[1], size = userEsp[2], offset = userEsp[4];
+            int fd = (int) userEsp[3];
+            file* temp_file = nullptr;
+            if(addr % 4096 != 0 || size % 4096 != 0 || offset % 4096 != 0 || fd < -1 || fd >= 10)
                 break;
             if(size == 0){
                 frame[7] = 69;
                 return 69;
+            }
+            if(fd != -1){
+                if(pcbs.mine()->fd[fd] == nullptr)
+                    break;
+                temp_file = pcbs.mine()->fd[fd];
             }
             if(addr == 0){
                 map_range* curr = pcbs.mine()->empty_list;
                 while(curr != nullptr){
                     if(curr->size <= size){
                         frame[7] = curr->addr;
-                        pcbs.mine()->mmap = new map_range{curr->addr, size, nullptr, pcbs.mine()->mmap};
+                        pcbs.mine()->mmap = new map_range{curr->addr, size, nullptr, pcbs.mine()->mmap, false, temp_file, offset};
                         pcbs.mine()->mmap->next->prev = pcbs.mine()->mmap;
                         ELF::empty_update(curr->addr, size);
                         return 69;
@@ -321,7 +311,7 @@ extern "C" int sysHandler(uint32_t eax, uint32_t *frame) {
             }else{
                 if(!ELF::empty_update(addr, size))
                     break;
-                pcbs.mine()->mmap = new map_range{addr, size, nullptr, pcbs.mine()->mmap};
+                pcbs.mine()->mmap = new map_range{addr, size, nullptr, pcbs.mine()->mmap, false, temp_file, offset};
                 pcbs.mine()->mmap->next->prev = pcbs.mine()->mmap;
                 frame[7] = addr;
                 return 69;
@@ -395,6 +385,116 @@ extern "C" int sysHandler(uint32_t eax, uint32_t *frame) {
             return 69;
         }
 
+        // CHDIR
+        case 1020:{
+            if(userEsp[1] < 0x80000000 || userEsp[1] >= 0xF0000000){
+                frame[7] = -1;
+                return 69;
+            }
+            Node* file = find_node((char*) userEsp[1]);
+            if(file == nullptr || !file->is_dir()){
+                frame[7] = -1;
+                return 69;
+            }
+            pcbs.mine()->cwd = file;
+            break;
+        }
+
+        // FILE OPEN
+        case 1021:{
+            int ans = -1;
+            for(int i = 0; i < 10; ++i)
+                if(pcbs.mine()->fd[i] == nullptr){
+                    ans = i;
+                    break;
+                }
+            if(ans == -1){
+                frame[7] = -1;
+                return 69;
+            }
+            Node* opened_node = find_node((char*) userEsp[1]);
+            if(opened_node == nullptr){
+                frame[7] = -1;
+                return 69;
+            }
+            pcbs.mine()->fd[ans] = new file{opened_node, true, false};
+            frame[7] = ans;
+            return 69;
+        }
+
+        // FILE CLOSE
+        case 1022:{
+            if(userEsp[1] >= 10 || pcbs.mine()->fd[userEsp[1]] == nullptr){
+                frame[7] = -1;
+                return 69;
+            }
+            file* curr = pcbs.mine()->fd[userEsp[1]];
+            for(uint32_t i = 0; i < 10; ++i){
+                if(i == userEsp[1])
+                    continue;
+                if(pcbs.mine()->fd[i] == curr){
+                    pcbs.mine()->fd[userEsp[1]] = nullptr;
+                    frame[7] = 0;
+                    return 69;
+                }
+            }
+            delete curr;
+            pcbs.mine()->fd[userEsp[1]] = nullptr;
+            break;
+        }
+
+        // LEN
+        case 1023:{
+            uint32_t fd = userEsp[1];
+            if(fd >= 10 || pcbs.mine()->fd[fd] == nullptr || !pcbs.mine()->fd[fd]->file->is_file())
+                frame[7] = -1;
+            else
+                frame[7] = pcbs.mine()->fd[fd]->file->size_in_bytes();
+            return 69;
+        }
+
+        // READ
+        case 1024:{
+            uint32_t fd = userEsp[1], count = userEsp[3];
+            if(fd >= 10 || pcbs.mine()->fd[fd] == nullptr || !pcbs.mine()->fd[fd]->read || !pcbs.mine()->fd[fd]->file->is_file() ||
+                    !verify_range(userEsp[2], frame)){
+                frame[7] = -1;
+                return 69;
+            }
+            if(count == 0){
+                frame[7] = 0;
+                return 69;
+            }
+            char* buffer = (char*) userEsp[2];
+            uint32_t ans = pcbs.mine()->fd[fd]->file->read_all(pcbs.mine()->fd[fd]->offset, count, buffer);
+            if(ans == 0)
+                frame[7] = 0;
+            else{
+                pcbs.mine()->fd[fd]->offset += ans;
+                frame[7] = ans;
+            }
+            return 69;
+        }
+
+        // DUP
+        case 1028:{
+            uint32_t fd = userEsp[1];
+            if(fd >= 10 || pcbs.mine()->fd[fd] == nullptr){
+                frame[7] = -1;
+                return 69;
+            }
+            int ans = -1;
+            for(int i = 0; i < 10; ++i)
+                if(pcbs.mine()->fd[i] == nullptr){
+                    ans = i;
+                    break;
+                }
+            if(ans != -1)
+                pcbs.mine()->fd[ans] = pcbs.mine()->fd[fd];
+            frame[7] = ans;
+            return 69;
+        }
+
         default:{
             Debug::panic("syscall %d\n", eax);
         }
@@ -405,6 +505,47 @@ extern "C" int sysHandler(uint32_t eax, uint32_t *frame) {
 
 void SYS::init(void) {
     IDT::trap(48,(uint32_t)sysHandler_,3);
+}
+
+Node* find_node(char* path){
+    if(path[0] == '\0')
+        return nullptr;
+    uint32_t prev = 0, tracker = 0;
+    Node* curr = pcbs.mine()->cwd;
+    if(path[0] == '/'){
+        prev = 1;
+        tracker = 1;
+        curr = fs->root;
+    }
+    while(path[tracker] != '\0'){
+        if(path[tracker] == '/'){
+            char* file_name = new char[tracker - prev + 1];
+            file_name[tracker - prev] = '\0';
+            for(uint32_t i = prev; i < tracker; ++i)
+                file_name[i - prev] = path[i];
+            if(!curr->is_dir()){
+                delete[] file_name;
+                return nullptr;
+            }
+            curr = fs->find(curr, file_name);
+            if(curr == nullptr){
+                delete[] file_name;
+                return nullptr;
+            }
+            delete[] file_name;
+            prev = tracker + 1;
+        }
+        ++tracker;
+    }
+    if(tracker == prev && curr == fs->root)
+        return curr;
+    char* file_name = new char[tracker - prev + 1];
+    file_name[tracker - prev] = '\0';
+    for(uint32_t i = prev; i < tracker; ++i)
+        file_name[i - prev] = path[i];
+    curr = fs->find(curr, file_name);
+    delete[] file_name;
+    return curr;
 }
 
 void exit(uint32_t error_code){
@@ -428,4 +569,20 @@ void delete_file(uint32_t old_pd){
         }
     }
     PhysMem::dealloc_frame(old_pd);
+}
+
+bool verify_range(uintptr_t va_, uintptr_t* frame){
+    map_range* curr = pcbs.mine()->empty_list;
+    while(curr != nullptr){
+        if(va_ >= curr->addr && va_ - curr->addr < curr->size){
+            return false;
+            /*
+            if(pcbs.mine()->handler == nullptr)
+                return false;
+            else
+                signal_handler(va_, frame);*/
+        }
+        curr = curr->next;
+    }
+    return true;
 }
