@@ -1,8 +1,10 @@
 #pragma once
+
 #include "stdint.h"
 #include "queue.h"
 #include "pit.h"
 #include "shared.h"
+
 #include <coroutine>
 
 // Implementation details, we use a namespace to protect against

@@ -1,4 +1,9 @@
 #include "ide.h"
+#include "stdint.h"
+#include "debug.h"
+#include "machine.h"
+#include "atomic.h"
+#include "smp.h"
 
 // The drive number encodes the controller in bit 1 and the channel in bit 0
 

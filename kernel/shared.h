@@ -1,15 +1,16 @@
 #pragma once
-#include "stdint.h"
+
 #include "atomic.h"
 #include "heap.h"
+#include "stdint.h"
 
-template<typename T>
+template <typename T>
 struct Counted {
     T data;
     Atomic<uint32_t> ref_count{0};
 
-    template<typename... Args>
-    inline Counted(Args... args): data(args...) {}
+    template <typename... Args>
+    inline Counted(Args... args) : data(args...) {}
 
     Counted(Counted const&) = delete;
     Counted(Counted&&) = delete;
@@ -20,8 +21,7 @@ struct Counted {
 // Smart pointer for a reference-counted object of type T
 template <typename T>
 class Shared {
-
-    Counted<T> *ptr;
+    Counted<T>* ptr;
 
     inline void ref() {
         if (ptr != nullptr) {
@@ -41,16 +41,18 @@ class Shared {
     explicit inline Shared(Counted<T>* ptr) : ptr(ptr) {
         ref();
     }
-public:
+
+   public:
+    static const Shared<T> NUL;
 
     inline Shared() : ptr(nullptr) {
     }
 
-    inline Shared(Shared<T> const& rhs): ptr(rhs.ptr) {
+    inline Shared(Shared<T> const& rhs) : ptr(rhs.ptr) {
         ref();
     }
 
-    inline Shared(Shared<T>&& rhs): ptr(rhs.ptr) {
+    inline Shared(Shared<T>&& rhs) : ptr(rhs.ptr) {
         rhs.ptr = nullptr;
     }
 
@@ -81,8 +83,12 @@ public:
         ptr = nullptr;
     }
 
-    inline T* operator ->() const {
+    inline T* operator->() const {
         return &ptr->data;
+    }
+
+    inline bool operator==(Shared<T> const& rhs) {
+        return ptr == rhs.ptr;
     }
 
     template <typename... Args>
@@ -90,3 +96,6 @@ public:
         return Shared<T>{new Counted<T>(args...)};
     }
 };
+
+template <typename T>
+const Shared<T> Shared<T>::NUL= Shared<T>();

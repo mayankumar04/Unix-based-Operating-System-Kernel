@@ -1,588 +1,696 @@
 #include "sys.h"
+#include "debug.h"
+#include "elf.h"
+#include "events.h"
+#include "filesystem.h"
+#include "idt.h"
+#include "libk.h"
+#include "machine.h"
+#include "physmem.h"
+#include "process.h"
+#include "stdint.h"
+#include "vmm.h"
+#include "keyboard.h"
 
-extern Ext2* fs;
-PerCPU<pcb*> pcbs;
+extern "C" int sysHandler(SYS::Call::EAX eax, ProcessManagement::RegisterState* regs) {
+    return SYS::Call::handle_syscall(eax, regs);
+}
 
-extern "C" int sysHandler(uint32_t eax, uint32_t *frame) {
-    uint32_t* userEsp = (uint32_t*) frame[11];
-    // auto userEip = frame[8];
-    switch(eax) {
+// reads and returns a 4 byte param
+template <typename T>
+inline static T& get_param(void* user_esp, uint32_t param_num) {
+    return (T&)(((uint32_t*)user_esp)[param_num + 1]);
+}
 
-        // EXIT
-        case 0:{
-            exit(userEsp[1]);
+int SYS::Call::handle_syscall(EAX eax, RegisterState* regs) {
+    // save the state
+    PCB::current().save_state(regs);
+
+    uint32_t* user_esp = (uint32_t*)PCB::current().regs.esp_user;
+
+    // BUG : neeed to add checks that the incoming data is from user mem
+
+    switch (eax) {
+
+        case EXIT: {
+            uint32_t status = get_param<uint32_t>(user_esp, 0);
+            exit(status);
+            return -1;
         }
 
-        // WRITE
-        case 1:
-        case 1025:{
-            uint32_t fd = userEsp[1], count = userEsp[3];
-            if(fd >= 10 || pcbs.mine()->fd[fd] == nullptr || !pcbs.mine()->fd[fd]->write || !verify_range(userEsp[2], frame)){
-                frame[7] = -1;
-                return 69;
-            }
-            if(count == 0){
-                frame[7] = 0;
-                return 69;
-            }
-            char* p = (char*) userEsp[2];
-            if(pcbs.mine()->fd[fd]->stdout){
-                for(uint32_t i = 0; i < userEsp[3]; ++i)
-                    Debug::printf("%c", p[i]);
-                frame[7] = userEsp[3];
-            }else{
-                if(!pcbs.mine()->fd[fd]->file->is_file())
-                    frame[7] = -1;
-                else
-                    Debug::panic("*** TRIED WRITING TO AN EXT2 FILE WHICH IS NOT LEGAL FOR THIS PROG\n");
-            }
-            return 69;
+        case FORK: {
+            return return_or_yield(fork());
         }
 
-        // FORK
-        case 2:{
-            uint32_t* og_pd = (uint32_t*) getCR3();
-            uint32_t* copy_pd = (uint32_t*) PhysMem::alloc_frame();
-            for(int i = 0; i < 1024; ++i) {
-                if(i < 32) copy_pd[i] = og_pd[i];
-                else{
-                    uint32_t og_pt = og_pd[i];
-                    if(og_pt & 1){
-                        uint32_t* copy_pt = (uint32_t*) PhysMem::alloc_frame();
-                        copy_pd[i] = ((uint32_t) copy_pt) | (og_pt & 0xFFF);
-                        uint32_t* og_pt_ptr = (uint32_t*) (og_pt & 0xFFFFF000);
-                        for(int j = 0; j < 1024; ++j) {
-                            if((i == 960 && j == 0) || (i == 1019 && (j == 0 || j == 512))) copy_pt[j] = og_pt_ptr[j];
-                            else{
-                                uint32_t og_page = og_pt_ptr[j];
-                                if(og_page & 1){
-                                    uint32_t copy_page = PhysMem::alloc_frame();
-                                    memcpy((char *) copy_page, (char *) (og_page & 0xFFFFF000), 4096);
-                                    copy_pt[j] = copy_page | (og_page & 0xFFF);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            pcb* child_pcb = new pcb();
-            child_pcb->pd = (uint32_t) copy_pd;
-            memcpy((char*)(child_pcb->regs), (char*)frame, 52);
-            memcpy((char*)(pcbs.mine()->regs), (char*)frame, 52);
-            memcpy((char*)(child_pcb->back_regs), (char*)(pcbs.mine()->back_regs), 52);
-            child_pcb->regs[7] = 0;
-            pcbs.mine()->regs[7] = 1;
-            for(uint32_t i = 0; i < 100; ++i)
-                child_pcb->sems[i] = pcbs.mine()->sems[i];
-            for(uint32_t i = 0; i < 10; ++i)
-                child_pcb->fd[i] = pcbs.mine()->fd[i];
-            child_pcb->handler = nullptr;
-            if(pcbs.mine()->mmap != nullptr){
-                child_pcb->mmap = new map_range{pcbs.mine()->mmap->addr, pcbs.mine()->mmap->size, nullptr, nullptr, pcbs.mine()->mmap->loaded, pcbs.mine()->mmap->fd, pcbs.mine()->mmap->offset};
-                map_range* curr_child = child_pcb->mmap, *curr = pcbs.mine()->mmap->next;
-                while(curr != nullptr){
-                    curr_child->next = new map_range{curr->addr, curr->size, curr_child, nullptr, curr->loaded, curr->fd, curr->offset};
-                    curr_child = curr_child->next;
-                    curr = curr->next;
-                }
-            }
-            if(pcbs.mine()->empty_list != nullptr){
-                child_pcb->empty_list = new map_range{pcbs.mine()->empty_list->addr, pcbs.mine()->empty_list->size, nullptr, nullptr, false, nullptr, 0};
-                map_range* curr_child = child_pcb->empty_list, *curr = pcbs.mine()->empty_list->next;
-                while(curr != nullptr){
-                    curr_child->next = new map_range{curr->addr, curr->size, curr_child, nullptr, false, nullptr, 0};
-                    curr_child = curr_child->next;
-                    curr = curr->next;
-                }
-            }
-            child_pcb->cwd = pcbs.mine()->cwd;
-            pcbs.mine()->s.push(child_pcb);
-            go([child_pcb]() {
-                vmm_on(child_pcb->pd);
-                pcbs.mine() = child_pcb;
-                restart(child_pcb->regs);
-            });
-            frame[7] = 1;
-            return 69;
+        case SHUTDOWN: {
+            shutdown();
+            return -1;
         }
 
-        // SHUTDOWN
-        case 7:{
-            Debug::shutdown();
+        case YIELD: {
+            yield();
+            return -1;
         }
 
-        // YIELD
-        case 998:{
-            pcb* curr_pcb = pcbs.mine();
-            curr_pcb->pd = getCR3();
-            memcpy((char*)(curr_pcb->regs), (char*)frame, 52);
-            vmm_on(VMM::kernel_map);
-            go([curr_pcb]{
-                vmm_on(curr_pcb->pd);
-                pcbs.mine() = curr_pcb;
-                restart(curr_pcb->regs);
-            });
-            event_loop();
+        case JOIN: {
+            join();
+            return -1;
         }
 
-        // JOIN
-        case 999:{
-            pcb* curr_pcb = pcbs.mine();
-            if(curr_pcb->s.empty()){
-                frame[7] = -1;
-                return 69;
+        case EXECL1:
+        case EXECL2: {
+            // FIXME : should probably put a maximum arg length on this
+            // copy program path
+            char* program_path = get_param<char*>(user_esp, 0);
+            uint32_t program_path_len = K::strlen(program_path);
+            char* program_path_kernel = new char[program_path_len + 1];
+            K::strcpy(program_path_kernel, program_path);
+
+            // copy args
+            char** args = &get_param<char*>(user_esp, 1);
+            uint32_t arg_count;
+            for (arg_count = 0; args[arg_count] != 0; arg_count++) {
+                // count
             }
-            pcb* top_child = pcbs.mine()->s.pop();
-            curr_pcb->pd = getCR3();
-            memcpy((char*)(curr_pcb->regs), (char*)frame, 52);
-            vmm_on(VMM::kernel_map);
-            top_child->f.get([top_child, curr_pcb, frame](uint32_t error_code){
-                vmm_on(curr_pcb->pd);
-                pcbs.mine() = curr_pcb;
-                curr_pcb->regs[7] = error_code;
-                delete top_child;
-                restart(curr_pcb->regs);
-            });
-            event_loop();
+            char** args_kernel = new char*[arg_count + 1];
+            for (uint32_t i = 0; i < arg_count; i++) {
+                uint32_t arg_len = K::strlen(args[i]);
+                char* arg_kernel = new char[arg_len + 1];
+                K::strcpy(arg_kernel, args[i]);
+                args_kernel[i] = arg_kernel;
+            }
+            args_kernel[arg_count] = nullptr;
+
+            // get return value
+            uint32_t ret_val = execl(program_path_kernel, args_kernel);
+
+            // clean up if we failed. execl is responsible for cleanup on success
+            delete[] program_path_kernel;
+            for (uint32_t i = 0; i < arg_count; i++) {
+                delete[] args_kernel[i];
+            }
+            delete[] args_kernel;
+
+            return return_or_yield(ret_val);
         }
 
-        // EXECL
-        case 9:
-        case 1000:{
-            if(userEsp[1] < 0x80000000 || userEsp[1] >= 0xF0000000){
-                frame[7] = -1;
-                return 69;
-            }
-            Node* curr = find_node((char*) userEsp[1]);
-            if(curr == nullptr || !curr->is_file()){
-                frame[7] = -1;
-                return 69;
-            }
-            uint32_t args = 0;
-            while(userEsp[args + 2] != 0){
-                if(userEsp[args + 2] < 0x80000000 || userEsp[args + 2] >= 0xF0000000){
-                    frame[7] = -1;
-                    return 69;
-                }
-                ++args;
-            }
-            uint32_t total = 0;
-            for(uint32_t i = 2; i < args + 2; ++i){
-                char* curr_arg = (char*) userEsp[i];
-                uint32_t j = 1;
-                while(curr_arg[j - 1] != '\0')
-                    ++j;
-                total += j;
-            }
-            uint32_t N = 0xF0000000 - total;
-            N -= N % 4;
-            if(N - 4 * (args + 3) < 0x80000000){
-                frame[7] = -1;
-                return 69;
-            }
-            uint32_t* arg_pointers = new uint32_t[args + 1];
-            arg_pointers[args] = 0;
-            char* all_args = new char[total];
-            if(args > 0){
-                uint32_t prev = 0;
-                for (uint32_t i = 2; i < args + 2; ++i) {
-                    char* curr_arg = (char*) userEsp[i];
-                    uint32_t j = 0;
-                    while (curr_arg[j] != '\0') {
-                        all_args[prev + j] = curr_arg[j];
-                        ++j;
-                    }
-                    all_args[prev + j] = '\0';
-                    arg_pointers[i - 2] = N + prev;
-                    prev += j + 1;
-                }
-            }
-            uint32_t old_pd = getCR3();
-            VMM::per_core_init();
-            pcb* old_pcb = pcbs.mine();
-            pcbs.mine() = new pcb();
-            pcbs.mine()->pd = getCR3();
-            memcpy((char*)(pcbs.mine()->regs), (char*)(old_pcb->regs), 52);
-            memcpy((char*)(pcbs.mine()->back_regs), (char*)(old_pcb->back_regs), 52);
-            uint32_t entry = ELF::load(curr);
-            if(entry < 0x80000000 || entry >= 0xF0000000){
-                vmm_on(old_pd);
-                delete pcbs.mine();
-                pcbs.mine() = old_pcb;
-                frame[7] = -1;
-                return 69;
-            }
-            delete_file(old_pd);
-            old_pcb->pd = getCR3();
-            delete pcbs.mine();
-            pcbs.mine() = old_pcb;
-            memcpy((char*) N, all_args, total);
-            delete[] all_args;
-            N -= 4 * (args + 1);
-            memcpy((char*) N, (char*)arg_pointers, 4 * (args + 1));
-            delete[] arg_pointers;
-            uint32_t* last = new uint32_t[2];
-            last[1] = N;
-            last[0] = args;
-            N -= 8;
-            memcpy((char*) N, (char*) last, 8);
-            delete[] last;
-            switchToUser(entry, N, 0);
+        case GETCWD:{
+            char* buf = (char*)get_param<uint32_t>(user_esp, 0);
+            uint32_t size = get_param<uint32_t>(user_esp, 1);
+            return return_or_yield(getcwd(buf, size));
         }
 
-        // SEM
-        case 1001:{
-            for(uint32_t i = 0; i < 100; ++i)
-                if(pcbs.mine()->sems[i] == nullptr){
-                    pcbs.mine()->sems[i] = new Semaphore(userEsp[1]);
-                    frame[7] = i;
-                    return 69;
-                }
-            frame[7] = -1;
-            return 69;
+        case SEM: {
+            uint32_t n = get_param<uint32_t>(user_esp, 0);
+            return return_or_yield(sem(n));
         }
 
-        // SEM-UP
-        case 1002:{
-            if(userEsp[1] >= 100 || pcbs.mine()->sems[userEsp[1]] == nullptr){
-                frame[7] = -1;
-                return 69;
-            }
-            pcbs.mine()->sems[userEsp[1]]->up();
-            break;
+        case UP: {
+            uint32_t sem_desc = get_param<uint32_t>(user_esp, 0);
+            return return_or_yield(up(sem_desc));
         }
 
-        // SEM-DOWN
-        case 1003:{
-            if(userEsp[1] >= 100 || pcbs.mine()->sems[userEsp[1]] == nullptr){
-                frame[7] = -1;
-                return 69;
-            }
-            pcbs.mine()->pd = getCR3();
-            uint32_t* temp = new uint32_t[13];
-            memcpy((char*)temp, (char*)frame, 52);
-            vmm_on(VMM::kernel_map);
-            pcb* curr_pcb = pcbs.mine();
-            pcbs.mine()->sems[userEsp[1]]->down([curr_pcb, temp]{
-                vmm_on(curr_pcb->pd);
-                pcbs.mine() = curr_pcb;
-                memcpy((char*)(curr_pcb->regs), (char*)temp, 52);
-                delete[] temp;
-                curr_pcb->regs[7] = 0;
-                restart(curr_pcb->regs);
-            });
-            event_loop();
+        case DOWN: {
+            uint32_t sem_desc = get_param<uint32_t>(user_esp, 0);
+            return return_or_yield(down(sem_desc));
         }
 
-        // SIGNAL
-        case 1004:{
-            pcbs.mine()->handler = (void*) userEsp[1];
-            break;
+        case SIMPLE_SIGNAL: {
+            void (*handler)(int, unsigned) = get_param<void (*)(int, unsigned)>(user_esp, 0);
+            SYS::Call::simple_signal(handler);
+            return return_or_yield(0);
         }
 
-        // MMAP
-        case 1005:{
-            uint32_t addr = userEsp[1], size = userEsp[2], offset = userEsp[4];
-            int fd = (int) userEsp[3];
-            file* temp_file = nullptr;
-            if(addr % 4096 != 0 || size % 4096 != 0 || offset % 4096 != 0 || fd < -1 || fd >= 10)
-                break;
-            if(size == 0){
-                frame[7] = 69;
-                return 69;
-            }
-            if(fd != -1){
-                if(pcbs.mine()->fd[fd] == nullptr)
-                    break;
-                temp_file = pcbs.mine()->fd[fd];
-            }
-            if(addr == 0){
-                map_range* curr = pcbs.mine()->empty_list;
-                while(curr != nullptr){
-                    if(curr->size <= size){
-                        frame[7] = curr->addr;
-                        pcbs.mine()->mmap = new map_range{curr->addr, size, nullptr, pcbs.mine()->mmap, false, temp_file, offset};
-                        pcbs.mine()->mmap->next->prev = pcbs.mine()->mmap;
-                        ELF::empty_update(curr->addr, size);
-                        return 69;
-                    }
-                    curr = curr->next;
-                }
-            }else{
-                if(!ELF::empty_update(addr, size))
-                    break;
-                pcbs.mine()->mmap = new map_range{addr, size, nullptr, pcbs.mine()->mmap, false, temp_file, offset};
-                pcbs.mine()->mmap->next->prev = pcbs.mine()->mmap;
-                frame[7] = addr;
-                return 69;
-            }
-            break;
+        case SIMPLE_MMAP: {
+            void* addr = get_param<void*>(user_esp, 0);
+            uint32_t size = get_param<uint32_t>(user_esp, 1);
+            int fd = get_param<int>(user_esp, 2);
+            uint32_t offset = get_param<uint32_t>(user_esp, 3);
+            return return_or_yield((uint32_t)simple_mmap(addr, size, fd, offset));
         }
 
-        // SIG-RETURN
-        case 1006:{
-            if(pcbs.mine()->handler == nullptr)
-                memcpy((char*)(pcbs.mine()->regs), (char*)frame, 52);
-            else
-                memcpy((char*)(pcbs.mine()->regs), (char*)(pcbs.mine()->back_regs), 52);
-            restart(pcbs.mine()->regs);
+        case SIGRETURN: {
+            return return_or_yield(sigreturn());
         }
 
-        // SEM CLOSE
-        case 1007:{
-            if(userEsp[1] >= 100 || pcbs.mine()->sems[userEsp[1]] == nullptr){
-                frame[7] = -1;
-                return 69;
-            }
-            delete pcbs.mine()->sems[userEsp[1]];
-            pcbs.mine()->sems[userEsp[1]] = nullptr;
-            break;
+        case SEM_CLOSE: {
+            uint32_t sem_desc = get_param<uint32_t>(user_esp, 0);
+            return return_or_yield(sem_close(sem_desc));
         }
 
-        // UNMAP
-        case 1008:{
-            uint32_t addr = userEsp[1];
-            if(addr < 0x80000000 || addr >= 0xF0000000){
-                frame[7] = -1;
-                return 69;
-            }
-            map_range* curr = pcbs.mine()->mmap;
-            while(curr != nullptr){
-                if(addr >= curr->addr && addr - curr->addr < curr->size){
-                    if(!ELF::empty_add(curr->addr, curr->size))
-                        break;
-                    if(curr->loaded){
-                        uint32_t* pd = (uint32_t*) getCR3();
-                        for(uint32_t i = curr->addr; i - curr->addr < curr->size; i += 4096){
-                            uint32_t pt = pd[i >> 22];
-                            if(pt & 1){
-                                uint32_t* pt_ptr = (uint32_t*)(pt & 0xFFFFF000);
-                                if(pt_ptr[(i << 10) >> 22] & 1){
-                                    PhysMem::dealloc_frame(pt_ptr[(i << 10) >> 22] & 0xFFFFF000);
-                                    pt_ptr[(i << 10) >> 22] = 0;
-                                }
-                            }
-                        }
-                        vmm_on(getCR3());
-                    }
-                    if(curr->prev == nullptr && curr->next == nullptr)
-                        pcbs.mine()->mmap = nullptr;
-                    else if(curr->prev == nullptr)
-                        pcbs.mine()->mmap = curr->next;
-                    else if(curr->next == nullptr)
-                        curr->prev->next = nullptr;
-                    else{
-                        curr->prev->next = curr->next;
-                        curr->next->prev = curr->prev;
-                    }
-                    delete curr;
-                    frame[7] = 0;
-                    return 69;
-                }
-                curr = curr->next;
-            }
-            frame[7] = -1;
-            return 69;
+        case SIMPLE_MUNMAP: {
+            void* addr = get_param<void*>(user_esp, 0);
+            return return_or_yield(simple_munmap(addr));
         }
 
-        // CHDIR
-        case 1020:{
-            if(userEsp[1] < 0x80000000 || userEsp[1] >= 0xF0000000){
-                frame[7] = -1;
-                return 69;
-            }
-            Node* file = find_node((char*) userEsp[1]);
-            if(file == nullptr || !file->is_dir()){
-                frame[7] = -1;
-                return 69;
-            }
-            pcbs.mine()->cwd = file;
-            break;
+        case CHDIR: {
+            // copy program path
+            char* file_path = get_param<char*>(user_esp, 0);
+            uint32_t file_path_len = K::strlen(file_path);
+            char* file_path_kernel = new char[file_path_len + 1];
+            K::strcpy(file_path_kernel, file_path);
+            chdir(file_path_kernel);
+            delete file_path_kernel;
+            return return_or_yield(0);
         }
 
-        // FILE OPEN
-        case 1021:{
-            int ans = -1;
-            for(int i = 0; i < 10; ++i)
-                if(pcbs.mine()->fd[i] == nullptr){
-                    ans = i;
-                    break;
-                }
-            if(ans == -1){
-                frame[7] = -1;
-                return 69;
-            }
-            Node* opened_node = find_node((char*) userEsp[1]);
-            if(opened_node == nullptr){
-                frame[7] = -1;
-                return 69;
-            }
-            pcbs.mine()->fd[ans] = new file{opened_node, true, false};
-            frame[7] = ans;
-            return 69;
+        case TUI: {
+            int ret_val = tui();
+            return return_or_yield(ret_val);
         }
 
-        // FILE CLOSE
-        case 1022:{
-            if(userEsp[1] >= 10 || pcbs.mine()->fd[userEsp[1]] == nullptr){
-                frame[7] = -1;
-                return 69;
-            }
-            file* curr = pcbs.mine()->fd[userEsp[1]];
-            for(uint32_t i = 0; i < 10; ++i){
-                if(i == userEsp[1])
-                    continue;
-                if(pcbs.mine()->fd[i] == curr){
-                    pcbs.mine()->fd[userEsp[1]] = nullptr;
-                    frame[7] = 0;
-                    return 69;
-                }
-            }
-            delete curr;
-            pcbs.mine()->fd[userEsp[1]] = nullptr;
-            break;
+        case SET_TUI: {
+            int tui_id = get_param<int>(user_esp, 0);
+            int ret_val = set_tui(tui_id);
+            return return_or_yield(ret_val);
         }
 
-        // LEN
-        case 1023:{
-            uint32_t fd = userEsp[1];
-            if(fd >= 10 || pcbs.mine()->fd[fd] == nullptr || !pcbs.mine()->fd[fd]->file->is_file())
-                frame[7] = -1;
-            else
-                frame[7] = pcbs.mine()->fd[fd]->file->size_in_bytes();
-            return 69;
+        case OPEN: {
+            // copy program path
+            char* file_path = get_param<char*>(user_esp, 0);
+            uint32_t file_path_len = K::strlen(file_path);
+            char* file_path_kernel = new char[file_path_len + 1];
+            K::strcpy(file_path_kernel, file_path);
+            int ret_val = open(file_path_kernel);
+            delete file_path_kernel;
+            return return_or_yield(ret_val);
         }
 
-        // READ
-        case 1024:{
-            uint32_t fd = userEsp[1], count = userEsp[3];
-            if(fd >= 10 || pcbs.mine()->fd[fd] == nullptr || !pcbs.mine()->fd[fd]->read || !pcbs.mine()->fd[fd]->file->is_file() ||
-                    !verify_range(userEsp[2], frame)){
-                frame[7] = -1;
-                return 69;
-            }
-            if(count == 0){
-                frame[7] = 0;
-                return 69;
-            }
-            char* buffer = (char*) userEsp[2];
-            uint32_t ans = pcbs.mine()->fd[fd]->file->read_all(pcbs.mine()->fd[fd]->offset, count, buffer);
-            if(ans == 0)
-                frame[7] = 0;
-            else{
-                pcbs.mine()->fd[fd]->offset += ans;
-                frame[7] = ans;
-            }
-            return 69;
+        case CLOSE: {
+            int fd = get_param<int>(user_esp, 0);
+            return return_or_yield(close(fd));
         }
 
-        // DUP
-        case 1028:{
-            uint32_t fd = userEsp[1];
-            if(fd >= 10 || pcbs.mine()->fd[fd] == nullptr){
-                frame[7] = -1;
-                return 69;
-            }
-            int ans = -1;
-            for(int i = 0; i < 10; ++i)
-                if(pcbs.mine()->fd[i] == nullptr){
-                    ans = i;
-                    break;
-                }
-            if(ans != -1)
-                pcbs.mine()->fd[ans] = pcbs.mine()->fd[fd];
-            frame[7] = ans;
-            return 69;
+        case LEN: {
+            int fd = get_param<int>(user_esp, 0);
+            return return_or_yield(len(fd));
         }
 
-        default:{
-            Debug::panic("syscall %d\n", eax);
+        case READ: {
+            int fd = get_param<int>(user_esp, 0);
+            void* buffer = get_param<void*>(user_esp, 1);
+            size_t len = get_param<size_t>(user_esp, 2);
+            return return_or_yield(read(fd, buffer, len));
         }
+
+        case WRITE1:
+        case WRITE2: {
+            int fd = get_param<int>(user_esp, 0);
+            void* buffer = get_param<void*>(user_esp, 1);
+            size_t len = get_param<size_t>(user_esp, 2);
+            return return_or_yield(write(fd, buffer, len));
+        }
+
+        case PIPE: {
+            int* write_fd = get_param<int*>(user_esp, 0);
+            int* read_fd = get_param<int*>(user_esp, 1);
+            return return_or_yield(pipe(write_fd, read_fd));
+        }
+        case DUP2:
+        case DUP: {
+            int fd = get_param<int>(user_esp, 0);
+            return return_or_yield(dup(fd));
+        }
+        case GETCH:
+        {
+            return getChar(); 
+        }
+
+        default:
+            Debug::panic("syscall %d (%x, %x, %x)\n", eax, user_esp[0], user_esp[1], user_esp[2]);
     }
-    frame[7] = 0;
-    return 69;
+
+    return 0;
 }
 
 void SYS::init(void) {
-    IDT::trap(48,(uint32_t)sysHandler_,3);
+    IDT::trap(48, (uint32_t)sysHandler_, 3);
 }
 
-Node* find_node(char* path){
-    if(path[0] == '\0')
-        return nullptr;
-    uint32_t prev = 0, tracker = 0;
-    Node* curr = pcbs.mine()->cwd;
-    if(path[0] == '/'){
-        prev = 1;
-        tracker = 1;
-        curr = fs->root;
+void SYS::Call::exit(int rc) {
+    using namespace VMM;
+    using namespace ProcessManagement;
+
+    block([rc](Process me) {
+        me.pcb_phys().exit_status->exit(rc);
+        Process::destroy(me);
+    });
+}
+
+int SYS::Call::fork() {
+    using namespace VMM;
+    using namespace ProcessManagement;
+
+    // save the state is in pcb for direct to transfer to the child
+    // we are forking, so we should create a new child process
+    // no need to save the registers because they should be copied through COW
+    Process child_process = Process::create_like(Process::current());
+
+    // update PCBs
+    PCB& child_pcb = child_process.pcb_phys();
+    for (uint32_t i = 0; i < 100; i++) {
+        child_pcb.sems[i] = PCB::current().sems[i];
     }
-    while(path[tracker] != '\0'){
-        if(path[tracker] == '/'){
-            char* file_name = new char[tracker - prev + 1];
-            file_name[tracker - prev] = '\0';
-            for(uint32_t i = prev; i < tracker; ++i)
-                file_name[i - prev] = path[i];
-            if(!curr->is_dir()){
-                delete[] file_name;
-                return nullptr;
-            }
-            curr = fs->find(curr, file_name);
-            if(curr == nullptr){
-                delete[] file_name;
-                return nullptr;
-            }
-            delete[] file_name;
-            prev = tracker + 1;
+    PCB::current().children.add_left(child_pcb.exit_status);
+
+    child_pcb.working_directory = PCB::current().working_directory;
+    for (uint32_t i = 0; i < 10; i++) {
+        child_pcb.user_files[i] = PCB::current().user_files[i];
+    }
+
+    // BUG need to copy the state stack??
+
+    // schedule child
+    child_pcb.regs.eax = 0;
+    child_process.schedule();
+
+    return 1;
+}
+
+void SYS::Call::shutdown() {
+    FileSystem::close();
+    Debug::shutdown();
+}
+
+void SYS::Call::yield() {
+    ProcessManagement::yield();
+}
+
+void SYS::Call::join() {
+    using namespace ProcessManagement;
+
+    block([=](Process me) {
+        Shared<ExitHandle> child_handle = me.pcb_phys().children.remove_left();
+
+        // check if there is no children, in which case we just return -1
+        if (child_handle == Shared<ExitHandle>()) {
+            me.schedule([]() {
+                PCB::current().regs.eax = -1;
+            });
+        } else {
+            child_handle->wait(me);
         }
-        ++tracker;
+    });
+}
+
+int SYS::Call::execl(char* program_path, char** args) {
+    using namespace VMM;
+    using namespace ProcessManagement;
+
+    // get program
+    Shared<Node> program = FileSystem::find_by_path(PCB::current().working_directory, program_path);
+    if (program == Shared<Node>()) {
+        return -1;
     }
-    if(tracker == prev && curr == fs->root)
-        return curr;
-    char* file_name = new char[tracker - prev + 1];
-    file_name[tracker - prev] = '\0';
-    for(uint32_t i = prev; i < tracker; ++i)
-        file_name[i - prev] = path[i];
-    curr = fs->find(curr, file_name);
-    delete[] file_name;
-    return curr;
+
+    // create new process cuz be about to change memory possibly
+    Process new_process = Process::create_like(default_kernel_process);
+    Process old_process = Process::change(new_process);
+
+    // load program (assumes args have been copied to kernel space)
+    uint32_t entry = ELF::load(program);
+
+    // failed
+    if (entry == 0) {
+        Process::change(old_process);
+        Process::destroy(new_process);
+        return -1;
+    }
+
+    // NOTE: probably better ot put the checks in a separate function
+
+    // copy data from old process
+    PCB& old_pcb = old_process.pcb_phys();
+    PCB::current().exit_status = old_pcb.exit_status;
+    old_pcb.children.transfer_left(PCB::current().children);
+
+    PCB::current().working_directory = old_pcb.working_directory;
+    for (uint32_t i = 0; i < 10; i++) {
+        PCB::current().user_files[i] = old_pcb.user_files[i];
+    }
+
+    Process::destroy(old_process);
+
+    void* user_esp = (void*)VMM::VA_USER_PRIVATE_END;
+    user_esp = SYS::Helper::setup_initial_user_stack((void*)user_esp, args);
+
+    // cleanup since we succeeded
+    delete[] program_path;
+    for (uint32_t i = 0; args[i] != nullptr; i++) {
+        delete[] args[i];
+    }
+    delete[] args;
+
+    // have to call destructor manually because we don't return from here
+    program.reset();
+
+    PCB::current().regs.clear();
+    PCB::current().regs.eip = entry;
+    PCB::current().regs.esp_user = (uint32_t)user_esp;
+
+    resume_or_yield();
+
+    return 0;
 }
 
-void exit(uint32_t error_code){
-    pcbs.mine()->f.set(error_code);
-    uint32_t old_pd = getCR3();
-    vmm_on(VMM::kernel_map);
-    delete_file(old_pd);
-    event_loop();
+int SYS::Call::getcwd(char* buf, unsigned size){
+    
+    if(buf == nullptr) { //is this the correct null check?
+        size = (size == 0)?1:size;//replace 1 with cwd size later
+        buf = (char*)malloc(size);
+    }
+    //check if cwd size > size allocaed, return -1 if so
+    //otherwise copy cwd into buf and return 
+    return -1;
 }
 
-void delete_file(uint32_t old_pd){
-    uint32_t* pd_ptr = (uint32_t*) old_pd;
-    for(int i = 32; i < 960; ++i){
-        uint32_t pt = pd_ptr[i];
-        if(pt & 1){
-            uint32_t* pt_ptr = (uint32_t*)(pt & 0xFFFFF000);
-            for(int j = 0; j < 1024; ++j)
-                if(pt_ptr[j] & 1)
-                    PhysMem::dealloc_frame(pt_ptr[j] & 0xFFFFF000);
-            PhysMem::dealloc_frame((uint32_t) pt_ptr);
+int SYS::Call::sem(unsigned n) {
+    for (uint32_t i = 0; i < 100; i++) {
+        if (PCB::current().sems[i] == Shared<SemaphoreHandle>::NUL) {
+            PCB::current().sems[i] = Shared<SemaphoreHandle>::make(n);
+            return i;
         }
     }
-    PhysMem::dealloc_frame(old_pd);
+    return -1;
 }
 
-bool verify_range(uintptr_t va_, uintptr_t* frame){
-    map_range* curr = pcbs.mine()->empty_list;
-    while(curr != nullptr){
-        if(va_ >= curr->addr && va_ - curr->addr < curr->size){
-            return false;
-            /*
-            if(pcbs.mine()->handler == nullptr)
-                return false;
-            else
-                signal_handler(va_, frame);*/
-        }
-        curr = curr->next;
+int SYS::Call::up(unsigned sem_desc) {
+    if (sem_desc < 0 || sem_desc >= 100 || PCB::current().sems[sem_desc] == Shared<SemaphoreHandle>::NUL) {
+        return -1;
     }
-    return true;
+    PCB::current().sems[sem_desc]->up();
+    return 0;
+}
+
+int SYS::Call::down(unsigned sem_desc) {
+    if (sem_desc < 0 || sem_desc >= 100 || PCB::current().sems[sem_desc] == Shared<SemaphoreHandle>::NUL) {
+        return -1;
+    }
+    PCB::current().regs.eax = 0;
+    block([=](Process me) {
+        me.pcb_phys().sems[sem_desc]->down(me);
+    });
+    return -1;
+}
+
+void SYS::Call::simple_signal(void (*handler)(int, unsigned)) {
+    // NOTE : maybe need to check the handler to see if it a valid addr??
+    PCB::current().handler = handler;
+}
+
+void* SYS::Call::simple_mmap(void* addr, unsigned size, int fd, unsigned offset) {
+    VirtualAddress va = (VirtualAddress)addr;
+    uint32_t length = (uint32_t)size;
+    uint32_t file_offset = (uint32_t)offset;
+
+    // check argument veracity
+    if (page_down(va) != va ||
+        page_down(length) != length ||
+        (!is_region_in_user_mem(va, va + length) && va != 0) ||
+        page_down(file_offset) != file_offset) {
+        return 0;
+    }
+
+    // check if we are first fitting or fixed mapping
+    Flags mmap_flags = va != 0 ? Flags::MMAP_FIXED : 0;
+    mmap_flags = mmap_flags | Flags::MMAP_REAL | Flags::MMAP_RW | Flags::MMAP_USER;
+
+    // check if we are mapping a file or not
+    if (fd == -1) {
+        return mmap(PCB::current().mmap_tree, va, length, mmap_flags, Shared<Node>::NUL, 0, 0);
+    } else {
+        if (!SYS::Helper::is_valid_fd(fd)) {
+            return 0;
+        }
+
+        // BUG : need to check the type of the file
+
+        OpenFile open_file = PCB::current().user_files[fd];
+        Shared<Node> node = ((NodeFile*)(open_file.uf->ptr))->node;
+
+        return mmap(PCB::current().mmap_tree, va, length, mmap_flags, node, file_offset, length);
+    }
+}
+
+int SYS::Call::sigreturn() {
+    // make sure we are in a signal handler
+    if (!PCB::current().in_signal_handler) {
+        return -1;
+    }
+    PCB::current().pop_state();
+    PCB::current().in_signal_handler = false;
+    resume_or_yield();
+    return -1;
+}
+
+int SYS::Call::sem_close(int sem_desc) {
+    if (sem_desc < 0 || sem_desc >= 100 || PCB::current().sems[sem_desc] == Shared<SemaphoreHandle>::NUL) {
+        return -1;
+    }
+    PCB::current().sems[sem_desc] = Shared<SemaphoreHandle>::NUL;
+    return 0;
+}
+
+int SYS::Call::simple_munmap(void* addr) {
+    VirtualAddress va = (VirtualAddress)addr;
+    if (!is_region_in_user_mem(va, va + 1)) {
+        return -1;
+    }
+    if (munmap_containing_block(PCB::current().mmap_tree, Process::current().pd, va)) {
+        return 0;
+    }
+    return -1;
+}
+
+void SYS::Call::chdir(char* path) {
+    Shared<Node> cwd = PCB::current().working_directory;
+    PCB::current().working_directory = FileSystem::find_by_path(cwd, path);
+}
+
+int SYS::Call::tui() {
+    int fd = SYS::Helper::get_next_fd();
+    if(fd == -1) {
+        return -1;
+    }
+    PCB::current().user_files[fd]= OpenFile(Shared<UserFileContainer>::make(new TUIFile()), Flags::USER_FILE_READ | Flags::USER_FILE_WRITE);
+    return fd;
+}
+
+bool SYS::Call::set_tui(int tuifd) {
+    if(SYS::Helper::is_valid_fd(tuifd)) {
+        PCB::current().active_tui = tuifd;
+        //Debug::printf("PCB : %x\n", PCB::current());
+        //Debug::printf("The active tui is set to this: %d\n", PCB::current().active_tui);
+        return 1;
+    }
+    return 0;
+}
+
+// TODO: Implement the TextUI open part; how do we save as a node? Ctrl+S handler??
+int SYS::Call::open(const char* path) {
+    int fd = SYS::Helper::get_next_fd();
+    if (fd == -1) {
+        return -1;
+    }
+
+    Shared<Node> cwd = PCB::current().working_directory;
+
+    // search for the path
+    Shared<Node> node = FileSystem::find_by_path(cwd, path);
+
+    // check if the node is nul
+    if (node == Shared<Node>::NUL) {
+        return -1;
+    }
+
+    // deref if it is a symbolic link
+    if (node->is_symlink()) {
+        // search for the path
+        char* symbol = new char[node->size_in_bytes() + 100];
+        node->get_symbol(symbol);
+        symbol[node->size_in_bytes()] = 0;
+
+        node = FileSystem::find_by_path(cwd, symbol);
+
+        // check if the node is nul
+        if (node == Shared<Node>::NUL) {
+            return -1;
+        }
+    }
+
+    PCB::current().user_files[fd] = OpenFile(Shared<UserFileContainer>::make(new NodeFile(node)),
+                                             Flags::USER_FILE_READ | Flags::USER_FILE_WRITE);
+
+    return fd;
+}
+
+int SYS::Call::close(int fd) {
+    if (!SYS::Helper::is_valid_fd(fd)) {
+        return -1;
+    }
+
+    PCB::current().user_files[fd] = OpenFile();
+
+    return 0;
+}
+
+int SYS::Call::len(int fd) {
+    if (!SYS::Helper::is_valid_fd(fd)) {
+        return -1;
+    }
+
+    return PCB::current().user_files[fd].len();
+}
+
+ssize_t SYS::Call::read(int fd, void* buffer, size_t len) {
+    if (!SYS::Helper::is_valid_fd(fd)) {
+        return -1;
+    }
+
+    return PCB::current().user_files[fd].read(len, buffer);
+}
+
+ssize_t SYS::Call::write(int fd, void* buffer, size_t len) {
+    if (!SYS::Helper::is_valid_fd(fd)) {
+        return -1;
+    }
+
+    return PCB::current().user_files[fd].write(len, buffer);
+}
+
+int SYS::Call::pipe(int* write_fd, int* read_fd) {
+    int wfd = SYS::Helper::get_next_fd();
+    int rfd = SYS::Helper::get_next_fd(wfd);
+
+    if (wfd == -1 || rfd == -1) {
+        return -1;
+    }
+
+    Shared<UserFileContainer> pipe = Shared<UserFileContainer>::make(new PipeFile());
+
+    PCB::current().user_files[wfd] = OpenFile(pipe, Flags::USER_FILE_WRITE);
+    PCB::current().user_files[rfd] = OpenFile(pipe, Flags::USER_FILE_READ);
+
+    *write_fd = wfd;
+    *read_fd = rfd;
+
+    return 0;
+}
+
+int SYS::Call::dup(int fd) {
+    if (!SYS::Helper::is_valid_fd(fd)) {
+        return -1;
+    }
+
+    // search for a new place
+    int new_fd = SYS::Helper::get_next_fd();
+    if (new_fd == -1) {
+        return -1;
+    }
+
+    // copy the fd
+    PCB::current().user_files[new_fd] = PCB::current().user_files[fd];
+
+    return new_fd;
+}
+
+// =================================================================
+// ============================ HELPER =============================
+// =================================================================
+
+void* SYS::Helper::setup_initial_user_stack(void* user_esp, char** args) {
+    /**
+     * Structure of the stack (for main) to build:
+     *
+     *              return_addr     provided by user function _start
+     *  esp ->      argc
+     *              argv            (pointer to arg array (arg_arr))
+     *              char[]          arg0 char[]
+     *              char[]          arg1 char[]
+     *              ...
+     *              char[]          arg(argc-1) char[]
+     *  arg_arr ->  argv[0]         (pointer to arg0 char*)
+     *              argv[1]         (pointer to arg1 char*)
+     *              ...
+     *              argv[argc-1]    (pointer to arg(argc-1) char*)
+     *  bot ->      0               (null terminated array)
+     */
+
+    uint32_t* bot = ((uint32_t*)user_esp) - 1;
+    bot[0] = 0;
+
+    // get argc (1 more because of program path)
+    uint32_t argc = 0;
+    while (args[argc]) {
+        argc++;
+    }
+
+    // create arg buffers
+    char** arg_arr = ((char**)bot) - argc;
+    char* arg = (char*)arg_arr;
+
+    // fill stack with args
+    for (uint32_t i = 0; i < argc; i++) {
+        arg -= K::strlen(args[i]) + 1;
+        K::strcpy(arg, args[i]);
+        arg_arr[i] = arg;
+    }
+
+    // add argc, argv
+    constexpr uint32_t alignment = 16;
+    uint32_t aligned_top = ((((uint32_t)arg) / alignment) * alignment);
+    uint32_t* esp = ((uint32_t*)aligned_top) - 2;
+    esp[1] = (uint32_t)arg_arr;
+    esp[0] = argc;
+
+    // we are done!
+    return esp;
+}
+
+bool SYS::Helper::try_user_exception_handler(int type, unsigned arg) {
+    using namespace SmartVMM::Helper;
+
+    // dont allow reentrant exception handling
+    if (PCB::current().in_signal_handler || PCB::current().handler == nullptr) {
+        return false;
+    }
+
+    uint32_t* user_esp = (uint32_t*)PCB::current().regs.esp_user;
+    uint32_t* user_esp_handler = user_esp - 3;
+
+    // dont allow our selves to overflow the user stack
+    uint32_t is_user_safe = 0;
+    uint32_t pages_to_check = page_num((uint32_t)user_esp) - page_num((uint32_t)user_esp_handler) + 1;
+    foreach_allocated_vpn(PCB::current().mmap_tree,
+                          page_num((uint32_t)user_esp), pages_to_check,
+                          Flags::MMAP_REAL | Flags::MMAP_RW | Flags::MMAP_USER, 0,
+                          [&is_user_safe](PageNum pn, MMAPBlock* block) { is_user_safe++; return 0; });
+    if (is_user_safe < pages_to_check) {
+        return false;
+    }
+
+    // at this point we are safe so lets do it
+    PCB::current().push_state();
+    user_esp_handler[0] = VA_IMPLICIT_SIGRET;
+    user_esp_handler[1] = type;
+    user_esp_handler[2] = arg;
+    PCB::current().in_signal_handler = true;
+    PCB::current().regs.eip = (uint32_t)PCB::current().handler;
+    PCB::current().regs.esp_user = (uint32_t)user_esp_handler;
+    resume_or_yield();
+    return false;
+}
+
+int SYS::Helper::get_next_fd(int after) {
+    // search for a new place
+    for (int fd = K::max(0, after) + 1; fd < 10; fd++) {
+        if (!is_valid_fd(fd)) {
+            return fd;
+        }
+    }
+    return -1;
+}
+
+bool SYS::Helper::is_valid_fd(int fd) {
+    return fd >= 0 && fd < 10 && PCB::current().user_files[fd].uf != Shared<UserFileContainer>::NUL;
 }

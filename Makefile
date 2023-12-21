@@ -43,12 +43,13 @@ QEMU_CONFIG_FLAGS = -accel ${QEMU_ACCEL} \
 
 QEMU_FLAGS = -no-reboot \
 	     ${QEMU_CONFIG_FLAGS} \
-	     -nographic\
 	     --monitor none \
-	     --serial file:$*.raw \
+		 -serial mon:stdio \
+		 -device VGA \
+		 -display gtk,gl=on \
              -drive file=kernel/build/kernel.img,index=0,media=disk,format=raw \
              -drive file=$*.data,index=1,media=disk,format=raw \
-	     -device isa-debug-exit,iobase=0xf4,iosize=0x04
+	     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
 
 TIME = $(shell which time)
 
@@ -162,7 +163,7 @@ the_kernel :
 
 clean:
 	rm -rf *.diff *.raw *.out *.result *.kernel *.failure *.time *.data
-	(make -C kernel clean)
+	(make -C kernel clean -j 10)
 
 ${TEST_RAWS} : %.raw : Makefile the_kernel %.data
 	@echo -n "$* ... "

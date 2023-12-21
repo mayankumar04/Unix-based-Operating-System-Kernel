@@ -1,4 +1,11 @@
+#include "debug.h"
+#include "libk.h"
+#include "machine.h"
 #include "smp.h"
+#include "config.h"
+#include "kernel.h"
+#include "atomic.h"
+#include "heap.h"
 
 OutputStream<char> *Debug::sink = 0;
 bool Debug::debugAll = false;

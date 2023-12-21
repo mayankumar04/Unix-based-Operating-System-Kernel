@@ -1,8 +1,10 @@
 #include "pit.h"
-#include "events.h"
-#include "pcb.h"
 
-extern PerCPU<pcb*> pcbs;
+#include "debug.h"
+#include "idt.h"
+#include "machine.h"
+#include "process.h"
+#include "smp.h"
 
 /*
  * The old PIT runs at a fixed frequency of 1193182Hz but doesn't support
@@ -25,7 +27,7 @@ extern PerCPU<pcb*> pcbs;
 constexpr uint32_t PIT_FREQ = 1193182;
 
 /* Were we want the APIT to iunterrupt us */
-constexpr uint32_t APIT_vector = 40; 
+constexpr uint32_t APIT_vector = 40;
 
 uint32_t Pit::jiffiesPerSecond = 0;
 uint32_t Pit::apitCounter = 0;
@@ -34,13 +36,12 @@ volatile uint32_t Pit::jiffies = 0;
 struct PitInfo {
 };
 
-static PitInfo *pitInfo = nullptr;
+static PitInfo* pitInfo = nullptr;
 
 /* Do what you need to do in order to run the APIT at the given
  * frequency. Should be called by the bootstrap CPI
  */
 void Pit::calibrate(uint32_t hz) {
-
     pitInfo = new PitInfo();
 
     // Our objective is to count how many APIT tickes happen in
@@ -55,35 +56,33 @@ void Pit::calibrate(uint32_t hz) {
     // Why 20Hz? becasue the PIT has a fixed frequency of 1193182Hz
     // and a 16 bit divider, 20Hz will require a divider of 59658 which
     // we can fit in 16 bits
-    
 
-    SMP::apit_lvt_timer.set(0x00010000); // oneshot, masked, ...
-    SMP::apit_divide.set(0x0000000B); // divide by 1
+    SMP::apit_lvt_timer.set(0x00010000);  // oneshot, masked, ...
+    SMP::apit_divide.set(0x0000000B);     // divide by 1
 
     // Now let's program the PIT to compute the frequency
-    Debug::printf("| pitInit freq %dHz\n",hz);
+    Debug::printf("| pitInit freq %dHz\n", hz);
     uint32_t d = PIT_FREQ / 20;
 
     if ((d & 0xffff) != d) {
-        Debug::printf("| pitInit invalid divider %d\n",d);
+        Debug::printf("| pitInit invalid divider %d\n", d);
         d = 0xffff;
     }
-    Debug::printf("| pitInit divider %d\n",d);
+    Debug::printf("| pitInit divider %d\n", d);
 
     uint32_t initial = 0xffffffff;
     SMP::apit_initial_count.set(initial);
 
-    outb(0x61,1);          // speaker off, gate on
+    outb(0x61, 1);  // speaker off, gate on
 
-    outb(0x43,0b10110110); //  10 -> channel#2
-                           //  11 -> lobyte/hibyte
-                           // 011 -> square wave generator
-                           //   0 -> count in binary
-
+    outb(0x43, 0b10110110);  //  10 -> channel#2
+                             //  11 -> lobyte/hibyte
+                             // 011 -> square wave generator
+                             //   0 -> count in binary
 
     // write the divider to the PIT
-    outb(0x42,d);
-    outb(0x42,d >> 8);
+    outb(0x42, d);
+    outb(0x42, d >> 8);
 
     uint32_t last = inb(0x61) & 0x20;
     uint32_t changes = 0;
@@ -91,24 +90,24 @@ void Pit::calibrate(uint32_t hz) {
     // square-wave generator mode. So, the state is
     // really changing at 40Hz and we should loop
     // for 40 iterations if we want to wait for a second
-    // 
-    while(changes < 40) {
+    //
+    while (changes < 40) {
         uint32_t t = inb(0x61) & 0x20;
         if (t != last) {
-            changes ++;
+            changes++;
             last = t;
         }
     }
-    
+
     uint32_t diff = initial - SMP::apit_current_count.get();
 
     // stop the PIT
-    outb(0x61,0);
+    outb(0x61, 0);
 
-    Debug::printf("| APIT running at %uHz\n",diff);
+    Debug::printf("| APIT running at %uHz\n", diff);
     apitCounter = diff / hz;
     jiffiesPerSecond = hz;
-    Debug::printf("| APIT counter=%d for %dHz\n",apitCounter,hz);
+    Debug::printf("| APIT counter=%d for %dHz\n", apitCounter, hz);
 
     // Register the APIT interrupt handler
     IDT::interrupt(APIT_vector, (uint32_t)apitHandler_);
@@ -120,37 +119,33 @@ void Pit::init() {
         Debug::panic("apiCounter == 0, did you call Pit::calibrate?\n");
     }
 
-    SMP::apit_divide.set(0x0000000B); // divide by 1
+    SMP::apit_divide.set(0x0000000B);  // divide by 1
 
     // The following line will enable timer interrupts for this CPU
     // You better be prepared for it
     SMP::apit_lvt_timer.set(
-        (1 << 17) |      // Timer mode: 1 -> Periodic
-        0 << 16   |      // mask: 0 -> interrupts not masked
-        APIT_vector      // the interrupt vector
+        (1 << 17) |  // Timer mode: 1 -> Periodic
+        0 << 16 |    // mask: 0 -> interrupts not masked
+        APIT_vector  // the interrupt vector
     );
-        
+
     // Let's go
     SMP::apit_initial_count.set(apitCounter);
 }
 
-extern "C" void apitHandler(uint32_t* frame) {
+using namespace ProcessManagement;
+
+extern "C" void apitHandler(RegisterState* regs) {
     // interrupts are disabled.
     auto id = SMP::me();
     if (id == 0) {
         Pit::jiffies = Pit::jiffies + 1;
     }
     SMP::eoi_reg.set(0);
-    if((frame[9] & 0b11) == 0)
-        return;
-    pcb* curr_pcb = pcbs.mine();
-    curr_pcb->pd = getCR3();
-    memcpy((char*)(curr_pcb->regs), (char*) frame, 52);
-    vmm_on(VMM::kernel_map);
-    go([curr_pcb]{
-        vmm_on(curr_pcb->pd);
-        pcbs.mine() = curr_pcb;
-        restart(curr_pcb->regs);
-    });
-    event_loop();
+    
+    TextUI::render->update_cursor();
+
+    // this requires interrupts disabled
+    // this may or may not return, but its safe to that by this point
+    handle_timer(regs);
 }

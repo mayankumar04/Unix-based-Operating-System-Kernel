@@ -5,9 +5,6 @@
 #include "io.h"
 #include "stdint.h"
 #include "atomic.h"
-#include "libk.h"
-#include "machine.h"
-#include "heap.h"
 
 class Debug {
     const char* what;

@@ -7,10 +7,11 @@
     We will compile the MBR at 0x7C00 then extract the appropriate 512 byte
     block and copy it to the boot drive
 
-
 */
 
+    .equ GRAPHICS_MODE, 0x115
     // see script.ld to see how this code ends up at 0x7C00
+
     .section .mbr16,"awx",@progbits
 
     .code16
@@ -75,11 +76,19 @@ start:
     mov $0xe801,%ax
     int $0x15
 
-    mov %ax,memInfoAX
-    mov %bx,memInfoBX
-    mov %cx,memInfoCX
-    mov %dx,memInfoDX
-    mov $0x8000,%ax
+/*
+    This gets the vbe information from the BIOS and stores it into
+    vbe_info and mode_info
+*/
+    call vbe_get_info
+    call get_mode_info
+    call set_mode
+
+    mov %ax, memInfoAX
+    mov %bx, memInfoBX # bx is the video mode, if sign bit (15 is set won't be refreshed)
+    mov %cx, memInfoCX
+    mov %dx, memInfoDX
+    mov $0x8000, %ax
     jmp *%ax
 onex:
     pusha
@@ -89,12 +98,55 @@ onex:
     int $0x14
     popa
     ret
+/*
+    Sets VESA-Compliant video modes, starting at 640 by 480 and reaching 1280 by 1024 with 256 colors
+*/
+vbe_get_info:
+    pushw %ax
+    pushw %di
+    movw $0x4F00, %ax        # Super VGA support
+    movw $vbe_info_block, %di   # Pointer to buffer
+    int $0x10
+    # cmp $0x4f00, ax      # BIOS doesn't support VBE
+    # jne error
+    popw %di
+    popw %ax
+    ret
+get_mode_info:
+    pushw %ax
+    pushw %di
+    pushw %cx
+    movw $0x4F01, %ax      # Return mode information
+    movw $vbe_mode_block, %di   #  Pointer to buffer
+    movw $0x101, %cx       # [vbe_info.video_modes]; first mode
+    int $0x10
+    # cmp $0x4F00, ax        # BIOS doesn't support VBE
+    # jne error
+    popw %cx
+    popw %di
+    popw %ax 
+    ret
+/*
+    Sets VESA-Compliant video modes, starting at 640 by 480 and reaching 1280 by 1024 with 256 colors
+*/
+set_mode:
+    pushw %ax
+    pushw %bx
+    movw $0x4F02, %ax # sets the function code
+    movw $0x0003, %bx # sets the mode to text editor
+    orw $0x4000, %bx
+    int $0x10
+    popw %bx
+    popw %ax
+    ret
 end:
-    .skip 510 - (end - start)
-    .byte 0x55
-    .byte 0xaa
+    .skip 510 - (end - start) # Pads the MBR so that it takes up 512 bytes
+    .byte 0x55 # Replaces the hexadecimal value 0x55 at byte 510 of the MBR
+    .byte 0xaa # Forms the 16 bit value of 0xaa55, signature for bootable sectors
+
 
 // 0x7e00
+
 
 loadKernelHere:
 
@@ -137,8 +189,16 @@ resetEIP:
 tss:
     .skip 104 * 16
 
-// Everyting below this point is 32 bit
+    .global vbe_info_block
+vbe_info_block:
+    .byte 'V', 'B', 'E', '2'
+    .skip 512-4
 
+    .global vbe_mode_block
+vbe_mode_block:
+    .skip 256
+
+// Everyting below this point is 32 bit
 
     .section .entry32,"awx",@progbits
     .code32
@@ -155,6 +215,7 @@ kk:
 
     .extern pickKernelStack
     .extern kernelInit
+    .extern graphicsInit
 
     mov $tempStack,%esp
     call pickKernelStack

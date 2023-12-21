@@ -64,5 +64,5 @@ clean ::
 $B/%.kernel : script.ld Makefile $(OFILES)
 	@echo "linking    $*.kernel"
 	@mkdir -p build
-	ld -T script.ld -N -m elf_i386 -e start -o $@ $(OFILES)
+	ld -T script.ld -N -m elf_i386 -e start -o $@ $(OFILES) $(LDLIBS) $(LDFLAGS)
 

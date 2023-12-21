@@ -1,9 +1,10 @@
 #pragma once
+
 #include "stdint.h"
 #include "atomic.h"
 #include "queue.h"
 #include "events.h"
-#include "debug.h"
+
 #include <coroutine>
 
 class Semaphore {

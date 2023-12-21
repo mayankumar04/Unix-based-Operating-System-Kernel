@@ -1,124 +1,123 @@
-#pragma once
-#include "ide.h"
+#ifndef _ext2_h_
+#define _ext2_h_
+
 #include "atomic.h"
-#include "libk.h"
+#include "cache.h"
+#include "ide.h"
+#include "shared.h"
 
-struct SuperBlock {
-    uint32_t inodes_count;
-    uint32_t blocks_count;
-    uint32_t reserved_blocks_count;
-    uint32_t free_blocks_count;
-    uint32_t free_inodes_count;
-    uint32_t first_data_block;
-    uint32_t log_block_size;
-    uint32_t log_frag_size;
-    uint32_t blocks_per_group;
-    uint32_t frags_per_group;
-    uint32_t inodes_per_group;
-    uint32_t mtime;
-    uint32_t wtime;
-    uint16_t mnt_count;
-    uint16_t max_mnt_count;
-    uint16_t magic;
-    uint16_t state;
-    uint16_t errors;
-    uint16_t minor_rev_level;
-    uint32_t lastcheck;
-    uint32_t checkinterval;
-    uint32_t creator_os;
-    uint32_t rev_level;
-    uint16_t def_resuid;
-    uint16_t def_resgid;
-    uint32_t first_inode;
-    uint16_t inode_size;
-    uint16_t block_group_nr;
-    uint32_t feature_compat;
-    uint32_t feature_incompat;
-    uint32_t feature_ro_compat;
-    char uuid[16];
-    char volume_name[16];
-    uint32_t algo_bitmap;
-};
+// NOTE : most of these structs assume litte endian
 
-struct BlockGroup {
-    uint32_t block_bitmap;
-    uint32_t inode_bitmap;
-    uint32_t inode_table;
-    uint16_t free_blocks_count;
-    uint16_t free_inodes_count;
-    uint16_t used_dirs_count;
-    uint16_t pad;
-    char reserved[12];
-};
+#define EXT2_MAGIC_SIG ((0xef53))
+#define EXT2_DIR_ENTRY_MAX_NAME_LEN ((255))
 
-// just the bits
-struct NodeData {
-    uint16_t mode;
-    uint16_t uid;
-    uint32_t size_low;
-    uint32_t atime;
-    uint32_t ctime;
-    uint32_t mtime;
-    uint32_t dtime;
-    uint16_t gid;
-    uint16_t n_links;
-    uint32_t n_sectors;
-    uint32_t flags;
-    uint32_t os1;
-    uint32_t direct0;
-    uint32_t direct1;
-    uint32_t direct2;
-    uint32_t direct3;
-    uint32_t direct4;
-    uint32_t direct5;
-    uint32_t direct6;
-    uint32_t direct7;
-    uint32_t direct8;
-    uint32_t direct9;
-    uint32_t direct10;
-    uint32_t direct11;
-    uint32_t indirect_1;
-    uint32_t indirect_2;
-    uint32_t indirect_3;
-    uint32_t gen;
-    uint32_t reserved1;
-    uint32_t reserved2;
-    uint32_t fragment;
-    char os2[12];
+#define EXT2_INODE_DIR_TYPECODE ((0x4000))
+#define EXT2_INODE_FILE_TYPECODE ((0x8000))
+#define EXT2_INODE_SYMLINK_TYPECODE ((0xa000))
 
-    inline uint16_t get_type() {
-        return mode >> 12;
-    }
+#define __packed __attribute__((packed))
 
-    bool is_dir() {
-        return get_type() == 4;
-    }
+struct Ext2_DirEntry {
+    struct Ext2_DirEntryHeader {
+        uint32_t inumber;   /* the inumber of the entity */
+        uint16_t entry_len; /* the length of this entry*/
+        uint8_t name_len;   /* the length of the name*/
+        uint8_t file_type;  /* the type of the entity */
+    } header;
+    char name[EXT2_DIR_ENTRY_MAX_NAME_LEN + 1]; /* the name, with one slot for null terminator */
+} __packed;
 
-    bool is_file() {
-        return get_type() == 8;
-    }
+// adapted from OS dev https://wiki.osdev.org/Ext2
+struct Ext2_Inode {
+    uint16_t type_perms;            /* Type and Permissions  */
+    uint16_t uid;                   /* User ID */
+    uint32_t size_lo32;             /* Lower 32 bits of size in bytes */
+    uint32_t last_access_time;      /* Last Access Time (in POSIX time) */
+    uint32_t creation_time;         /* Creation Time (in POSIX time) */
+    uint32_t last_modif_time;       /* Last Modification time (in POSIX time) */
+    uint32_t deletion_time;         /* Deletion time (in POSIX time) */
+    uint16_t gid;                   /* Group ID */
+    uint16_t hard_links_count;      /* Count of hard links (directory entries) to this inode. When this reaches 0, the data blocks are marked as unallocated. */
+    uint32_t disk_sectors_used;     /* Count of disk sectors (not Ext2 blocks) in use by this inode, not counting the actual inode structure nor directory entries linking to the inode. */
+    uint32_t flags;                 /* Flags */
+    uint8_t os_val1[4];             /* Operating System Specific value #1 */
+    uint32_t direct_block[12];      /* Direct Block Pointers */
+    uint32_t singly_indirect_block; /* Singly Indirect Block Pointer (Points to a block that is a list of block pointers to data) */
+    uint32_t doubly_indirect_block; /* Doubly Indirect Block Pointer (Points to a block that is a list of block pointers to Singly Indirect Blocks) */
+    uint32_t triply_indirect_block; /* Triply Indirect Block Pointer (Points to a block that is a list of block pointers to Doubly Indirect Blocks) */
+    uint32_t generation_number;     /* Generation number (Primarily used for NFS) */
+    uint32_t extended_attr_block;   /* In Ext2 version 0, this field is reserved. In version >= 1, Extended attribute block (File ACL). */
+    uint32_t size_hi32;             /* In Ext2 version 0, this field is reserved. In version >= 1, Upper 32 bits of file size (if feature bit set) if it's a file, Directory ACL if it's a directory */
+    uint32_t fragment_block;        /* Block address of fragment */
+    uint8_t os_val2[12];            /*  Operating System Specific Value #2 */
+} __packed;
 
-    bool is_symlink() {
-        return get_type() == 0xa;
-    }
+struct Ext2_BlockGroupDesc {
+    uint32_t data_usage_bitmap_block;  /* the block address of the data bitmap */
+    uint32_t inode_usage_bitmap_block; /* the block address of the inode bitmap */
+    uint32_t inode_table_block;        /* block address of itable*/
+    uint16_t num_free_data;            /* number of free data blocks*/
+    uint16_t num_free_inode;           /* number of free inodes */
+    uint16_t num_dirs;                 /* number of directories */
+    uint8_t padding[14];
+} __packed;
 
-};
+struct Ext2_Superblock {
+    uint32_t inodes_count;         /* inodes count */
+    uint32_t blocks_count;         /* blocks count */
+    uint32_t r_blocks_count;       /* superuser reserved blocks count */
+    uint32_t free_blocks_count;    /* free blocks count */
+    uint32_t free_inodes_count;    /* free inodes count */
+    uint32_t superblock_block_num; /* superblock's block num */
+    uint32_t log_block_size;       /* block size */
+    uint32_t log_frag_size;        /* fragment size */
+    uint32_t blocks_per_group;     /* num blocks per group */
+    uint32_t frags_per_group;      /* num fragments per group */
+    uint32_t inodes_per_group;     /* num inodes per group */
+    uint32_t mtime;                /* last mount time */
+    uint32_t wtime;                /* last write time */
+    uint16_t mnt_count;            /* mount count since last consistency check*/
+    uint16_t max_mnt_count;        /* mount count max till consistency check*/
+    uint16_t magic;                /* magic signature */
+    uint16_t state;                /* file system state */
+    uint16_t errors;               /* errors behavior */
+    uint16_t minor_rev_level;      /* minor revision level */
+    uint32_t lastcheck;            /* time of last check */
+    uint32_t checkinterval;        /* max. time between checks */
+    uint32_t creator_os;           /* OS id */
+    uint32_t major_rev_level;      /* major revision level */
+    uint16_t uid_res;              /* uid for reserved blocks */
+    uint16_t gid_res;              /* gid for reserved blocks */
+    uint8_t padding[940];          /* either for later features in ext2 or ext3 or padding*/
+} __packed;
 
 // A wrapper around an i-node
-class Node : public BlockIO { // we implement BlockIO because we
-                              // represent data
+class Node : public BlockIO {  // we implement BlockIO because we
+                               // represent data
 
-    Ide* ide;
+    /**
+     * the number of entries in the directory, or MAX if not computed yet
+     * we are safe to use MAX as we could not have a disk large enough to
+     * reach that limit. we would run out of inodes and then data nodes
+     */
+    uint32_t num_entries;
 
-public:
+    Ext2_Inode inode;
+    Shared<CachedBlockReader> cbr;
 
+   public:
     // i-number of this node
     const uint32_t number;
-    NodeData data;
 
-    Node(Ide* ide, uint32_t number, uint32_t block_size) : BlockIO(block_size), ide(ide), number(number) {
+   private:
+    uint32_t get_pbn_from_array(uint32_t array_pbn, uint32_t array_index);
+    void check_pbn(uint32_t pbn);
+    uint32_t logical_to_physical(uint32_t logical_block_number);
+    void count_entries_jit();
+    uint32_t read_block_data(uint32_t logical_block_number, char* buffer, uint32_t base_block_offset, uint32_t bytes_to_read);
 
-    }
+   public:
+    Node(uint32_t number, Ext2_Inode inode, Shared<CachedBlockReader> cbr);
 
     virtual ~Node() {}
 
@@ -126,32 +125,31 @@ public:
     //    - for a file, the size of the file
     //    - for a directory, implementation dependent
     //    - for a symbolic link, the length of the name
-    uint32_t size_in_bytes() override {
-        return data.size_low;
-    }
+    uint32_t size_in_bytes();
 
     // read the given block (panics if the block number is not valid)
     // remember that block size is defined by the file system not the device
-    void read_block(uint32_t number, char* buffer) override;
+    virtual void read_block(uint32_t logical_block_number, char* buffer) override;
+
+    // Read up to "n" bytes starting at "offset" and put the restuls in "buffer".
+    // returns:
+    //   > 0  actual number of bytes read
+    //   = 0  end (offset == size_in_bytes)
+    //   -1   error (offset > size_in_bytes)
+    virtual int64_t read(uint32_t offset, uint32_t n, char* buffer) override;
 
     inline uint16_t get_type() {
-        return data.get_type();
+        return inode.type_perms & 0xf000;
     }
 
     // true if this node is a directory
-    bool is_dir() {
-        return data.is_dir();
-    }
+    bool is_dir();
 
     // true if this node is a file
-    bool is_file() {
-        return data.is_file();
-    }
+    bool is_file();
 
     // true if this node is a symbolic link
-    bool is_symlink() {
-        return data.is_symlink();
-    }
+    bool is_symlink();
 
     // If this node is a symbolic link, fill the buffer with
     // the name the link referes to.
@@ -163,76 +161,55 @@ public:
     void get_symbol(char* buffer);
 
     // Returns the number of hard links to this node
-    uint32_t n_links() {
-        return data.n_links;
-    }
+    uint32_t n_links();
 
-    template <typename Work>
-    void entries(Work work) {
-        ASSERT(is_dir());
-        uint32_t offset = 0;
-
-        while (offset < data.size_low) {
-            uint32_t inode;
-            read(offset,inode);
-            uint16_t total_size;
-            read(offset+4,total_size);
-            uint8_t name_length;
-            read(offset+6,name_length);
-            auto name = new char[name_length+1];
-            name[name_length] = 0;
-            auto cnt = read_all(offset+8,name_length,name);
-            ASSERT(cnt == name_length);
-            work(inode,name);
-            delete[] name;
-            offset += total_size;
-        }
-    }
-
+    // return the inumber of the child with the name. or 0 if could not find
     uint32_t find(const char* name);
 
     // Returns the number of entries in a directory node
     //
     // Panics if not a directory
     uint32_t entry_count();
-};
 
+    template <typename T>
+    void read(uint32_t offset, T& thing) {
+        auto cnt = read_all(offset, sizeof(T), (char*)&thing);
+        ASSERT(cnt == sizeof(T));
+    }
+};
 
 // This class encapsulates the implementation of the Ext2 file system
 class Ext2 {
-    // The device on which the file system resides
-    Ide* ide;
-public:
+    // the superblock
+    Ext2_Superblock superblock;
+
+    // The filesystem
+    Shared<CachedBlockReader> cbr;
+
+    // the block groups
+    uint32_t block_group_count;
+    Ext2_BlockGroupDesc* block_groups_descriptor_table;
+
+   public:
     // The root directory for this file system
-    Node* root;
-private:
-    uint32_t blockSize;
-    uint32_t numberOfNodes;
-    uint32_t numberOfBlocks;
-    uint32_t iNodeSize;
-    uint32_t nGroups;
-    uint32_t *iNodeTables;
-    uint32_t iNodesPerGroup;
-public:
+    Shared<Node> root;
+
     // Mount an existing file system residing on the given device
     // Panics if the file system is invalid
-    Ext2(Ide* ide);
+    Ext2(Shared<Ide> ide);
+    virtual ~Ext2();
 
     // Returns the block size of the file system. Doesn't have
     // to match that of the underlying device
-    uint32_t get_block_size() {
-        return blockSize;
-    }
+    uint32_t get_block_size();
 
     // Returns the actual size of an i-node. Ext2 specifies that
     // an i-node will have a minimum size of 128B but could have
     // more bytes for extended attributes
-    uint32_t get_inode_size() {
-        return iNodeSize;
-    }
+    uint32_t get_inode_size();
 
     // Returns the node with the given i-number
-    Node* get_node(uint32_t number);
+    Shared<Node> get_node(uint32_t inumber);
 
     // If the given node is a directory, return a reference to the
     // node linked to that name in the directory.
@@ -240,14 +217,14 @@ public:
     // Returns a null reference if "name" doesn't exist in the directory
     //
     // Panics if "dir" is not a directory
-    Node* find(Node* dir, const char* name) {
-        uint32_t number = dir->find(name);
-        if (number == 0) {
-            return nullptr;
-        } else {
-            //Debug::printf("found %s at %d\n",name,number);
-            return get_node(number);
-        }
-    }
+    Shared<Node> find(Shared<Node> dir, const char* name);
 
+    // traverses the given path to find a file. 
+    // supports relative and absolute paths (which start with a '/')
+    // supports a variety of path styles such as "hello/", "hello", "hello/hello", "hello/hello/", etc
+    // returns null reference if the node can't be found
+    Shared<Node> find_by_path(Shared<Node> from, const char* path);
 };
+
+
+#endif

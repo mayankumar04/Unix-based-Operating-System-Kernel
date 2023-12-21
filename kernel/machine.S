@@ -9,12 +9,12 @@ outb:
 	ret
 
 	# outl(int port, int val)
-        .global outl
+    .global outl
 outl:
-        mov 4(%esp),%dx
-        mov 8(%esp),%eax
-        outl %eax,%dx
-        ret
+    mov 4(%esp),%dx
+    mov 8(%esp),%eax
+    outl %eax,%dx
+    ret
 
 	# int inb(int port)
 	.global inb
@@ -59,13 +59,28 @@ spuriousHandler_:
     .global apitHandler_
 apitHandler_:
     // TODO: XMM, MMX, FP, ...
+    push %eax               # error code placeholder
     pusha
     push %esp
     call apitHandler
     pop %esp
     popa
+    add $4, %esp            # pop error code placeholder
     iret
 
+    .extern keyboard_interrupt_handler
+    .global keyboard_interrupt_handler_
+keyboard_interrupt_handler_:
+    // TODO: XMM, MMX, FP, ...
+    push %eax               # error code placeholder
+    pusha
+    push %esp
+    call keyboard_interrupt_handler
+    pop %esp
+    popa
+    add $4, %esp            # pop error code placeholder
+    iret
+    
     .global sti
 sti:
     sti
@@ -85,21 +100,21 @@ getFlags:
 	/* memcpy(void* dest, void* src, size_t n) */
         .global memcpy
 memcpy:
-        mov 4(%esp),%eax       # dest
-        mov 8(%esp),%edx       # src
-        mov 12(%esp),%ecx      # n
-        push %ebx
+    mov 4(%esp),%eax       # dest
+    mov 8(%esp),%edx       # src
+    mov 12(%esp),%ecx      # n
+    push %ebx
 1:
-        add $-1,%ecx
-        jl 1f
-        movb (%edx),%bl
-        movb %bl,(%eax)
-        add $1,%edx
-        add $1,%eax
-        jmp 1b
+    add $-1,%ecx
+    jl 1f
+    movb (%edx),%bl
+    movb %bl,(%eax)
+    add $1,%edx
+    add $1,%eax
+    jmp 1b
 1:
-        pop %ebx
-        ret
+    pop %ebx
+    ret
 
      /* bzero(void* dest, size_t n) */
     .global bzero
@@ -159,29 +174,32 @@ cpuid:
 
 
 	# switchToUser(pc,esp,eax)
-        .global switchToUser
+    .global switchToUser
 switchToUser:
-        mov 4(%esp),%ecx        # pc
-        mov 8(%esp),%ebx        # esp
-        mov 12(%esp),%eax       # eax
-        pushl userSS            # user SS
-        pushl %ebx              # user ESP
-        pushf                   # ring 3 flags
-        orl $0x200,(%esp)       # enable interrupts
-        pushl userCS            # user CS
-        pushl %ecx              # user EIP
-        iret
+    mov 4(%esp),%ecx        # pc
+    mov 8(%esp),%ebx        # esp
+    mov 12(%esp),%eax       # eax
+    pushl userSS            # user SS
+    pushl %ebx              # user ESP
+    pushf                   # ring 3 flags
+    orl $0x200,(%esp)       # enable interrupts
+    pushl userCS            # user CS
+    pushl %ecx              # user EIP
+    iret
 
 	.global sysHandler_
 sysHandler_:
-        pusha
-        push %esp
-        push %eax
-        .extern sysHandler
-        call sysHandler
-        add $8,%esp
-        popa
-        iret
+    push %eax               # error code placeholder
+    pusha
+    push %esp
+    push %eax
+    .extern sysHandler
+    call sysHandler
+    add $8,%esp
+    mov %eax, 28(%esp)      # fix return value
+    popa
+    add $4, %esp            # pop error code placeholder
+    iret
 
 /* invlpg(uint32_t va) */
     .global invlpg
@@ -220,24 +238,25 @@ vmm_on:
     mov %eax,%cr0
     ret
 
+    /* vmm_off() */
+    .global vmm_off
+vmm_off:
+    mov %cr0,%eax
+    and $0x7FFFFFFF,%eax
+    mov %eax,%cr0
+    ret
+
+    /* toggle_write_protect() */
+    .global toggle_write_protect
+toggle_write_protect:
+    mov %cr0,%eax
+    xor $0x00010000,%eax
+    mov %eax,%cr0
+    ret
+
     /* uint32_t getCR3() */
     .global getCR3
 getCR3:
     mov %cr3,%eax
     ret
 
-	.global restart
-restart:
-    movl 4(%esp), %eax             # moving parameter address into %eax
-    add $48, %eax                  # moving to the last position in regs array (to copy in reverse)
-    movl $0, %ebx                  # %ebx is a counter variable
-    L1:
-        sub $4, %esp               # edit stack pointer
-        movl (%eax), %ecx          # moving current value in regs array into temporary register
-        movl %ecx, (%esp)          # moving temporary register onto the stack
-        sub $4, %eax               # subtract 4 from %eax to move to the next element in regs array
-        add $1, %ebx               # incrementing counter
-    cmp $13, %ebx                  # comparison to loop
-    jl L1                          # jump to L1
-    popa
-    iret

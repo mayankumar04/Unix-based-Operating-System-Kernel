@@ -3,8 +3,6 @@
 
 #include "stdint.h"
 #include "debug.h"
-#include "machine.h"
-#include "libk.h"
 
 //
 // Base class for things that support block IO (disks, files, directories, etc)

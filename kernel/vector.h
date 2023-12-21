@@ -1,5 +1,3 @@
-#ifndef MAYANK04_VECTOR_H
-#define MAYANK04_VECTOR_H
 #include "debug.h"
 
 template <typename T>
@@ -14,16 +12,16 @@ public:
         curr = 0;
     }
 
-    ~vector(){
-        delete[] arr;
-    }
+    //~vector(){
+    //    delete[] arr;
+    //}
 
     void push_back(T t){
         if(curr == cap){
             T* temp = new T[2 * cap];
             for(int i = 0; i < cap; ++i)
                 temp[i] = arr[i];
-            delete[] arr;
+            //delete[] arr;
             cap *= 2;
             arr = temp;
         }
@@ -46,7 +44,7 @@ public:
                     temp[i + 1] = arr[i];
             }
             temp[index] = t;
-            delete[] arr;
+            //delete[] arr;
             cap *= 2;
             arr = temp;
         }
@@ -54,6 +52,7 @@ public:
     }
 
     T get(int index){
+        //Debug::printf("BAD INDEX: %d", index);
         ASSERT(index < curr && index >= 0);
         return arr[index];
     }
@@ -73,5 +72,3 @@ public:
         return curr;
     }
 };
-
-#endif

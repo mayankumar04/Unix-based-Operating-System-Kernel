@@ -1,6 +1,8 @@
 #include "physmem.h"
+#include "atomic.h"
 #include "debug.h"
 #include "atomic.h"
+#include "idt.h"
 
 namespace PhysMem {
 
@@ -41,7 +43,7 @@ namespace PhysMem {
         LockGuard g{lock};
 
         ASSERT(offset(p) == 0);
-        //bzero((void*)p,FRAME_SIZE);
+
         Frame* f = (Frame*) p;    
         f->next = firstFree;
         firstFree = f;

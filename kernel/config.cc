@@ -1,3 +1,5 @@
+#include "stdint.h"
+#include "debug.h"
 #include "config.h"
 
 struct MemInfo {
