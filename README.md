@@ -1,6 +1,7 @@
 This is an attempt at creating a working prototype OS (based on Unix).
 
 =============== EXECUTION INSTRUCTIONS ===============
+
 Run the command "make clean; window_qemu read-input" and it should run the Text Editor.
 
 =============== UPDATES ===============
